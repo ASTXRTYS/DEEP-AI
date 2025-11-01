@@ -9,7 +9,8 @@ from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.store.postgres import PostgresStore
 
 from .agent_memory import AgentMemoryMiddleware
 from .config import COLORS, config, console, get_default_coding_instructions
@@ -152,6 +153,32 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         source_content = get_default_coding_instructions()
         agent_md.write_text(source_content)
 
+    # Set up persistent checkpointing for short-term memory (conversations)
+    import sqlite3
+    checkpoint_db = agent_dir / "checkpoints.db"
+    # Direct construction - proper way for long-running applications
+    conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+
+    # Initialize checkpointer schema if needed (first time setup)
+    try:
+        checkpointer.setup()
+    except Exception:
+        pass  # Already set up
+
+    # Set up PostgreSQL store for cross-conversation long-term memory
+    import psycopg
+    database_url = os.environ.get("DEEPAGENTS_DATABASE_URL", "postgresql://localhost/deepagents")
+    # Direct construction for long-running applications
+    pg_conn = psycopg.connect(database_url, autocommit=True)
+    store = PostgresStore(pg_conn)
+
+    # Initialize store schema if needed (first time setup)
+    try:
+        store.setup()
+    except Exception:
+        pass  # Already set up
+
     # Long-term backend - rooted at agent directory
     # This handles both /memories/ files and /agent.md
     long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
@@ -264,6 +291,8 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         tools=tools,
         backend=backend,
         middleware=agent_middleware,
+        checkpointer=checkpointer,
+        store=store,
         interrupt_on={
             "shell": shell_interrupt_config,
             "write_file": write_file_interrupt_config,
@@ -272,7 +301,5 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
             "task": task_interrupt_config,
         },
     ).with_config(config)
-
-    agent.checkpointer = InMemorySaver()
 
     return agent

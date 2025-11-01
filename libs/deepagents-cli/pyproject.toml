@@ -10,9 +10,14 @@ dependencies = [
   "requests",
   "rich>=13.0.0",
   "prompt-toolkit>=3.0.52",
+  "langchain-anthropic>=0.1.0",
+  "langchain-community>=0.1.0",
   "langchain-openai>=0.1.0",
   "tavily-python",
   "python-dotenv",
+  "langgraph-checkpoint-sqlite>=3.0.0",
+  "langgraph-checkpoint-postgres>=3.0.0",
+  "psycopg[binary,pool]>=3.0.0",
 ]
 
 [project.scripts]

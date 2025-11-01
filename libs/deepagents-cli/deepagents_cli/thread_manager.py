@@ -4,24 +4,34 @@ This module provides ThreadManager for creating, switching, and managing
 conversation threads. Each thread maintains its own conversation history
 in the LangGraph checkpointer while sharing access to /memories/ files.
 
-Thread ID Format: {assistant_id}:{uuid_short}
-Example: agent:a1b2c3d4
+Thread ID Format: Pure UUID (LangGraph standard)
+Example: 550e8400-e29b-41d4-a716-446655440000
 
 Metadata Storage: ~/.deepagents/{agent}/threads.json
+
+Note: We follow LangGraph's convention of using pure UUIDs for thread IDs.
+This ensures compatibility with RemoteGraph and future LangGraph features.
+The assistant_id is stored in metadata, not embedded in the thread ID.
 """
 
 import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from langgraph.graph.graph import CompiledGraph
 
 
 class ThreadMetadata(TypedDict):
     """Metadata for a conversation thread."""
 
     id: str
-    """Thread ID in format {assistant_id}:{uuid_short}"""
+    """Thread ID (pure UUID following LangGraph standard)"""
+
+    assistant_id: str
+    """Agent/assistant this thread belongs to"""
 
     created: str
     """ISO 8601 timestamp when thread was created"""
@@ -41,13 +51,16 @@ class ThreadManager:
 
     Each agent (identified by assistant_id) has its own set of threads stored
     in ~/.deepagents/{assistant_id}/threads.json. The manager handles:
-    - Creating new threads with unique IDs
+    - Creating new threads with unique UUIDs (LangGraph standard)
     - Switching between existing threads
     - Listing all available threads
-    - Forking threads to branch conversations
+    - Forking threads to branch conversations (with checkpoint state copying)
 
-    Thread IDs follow the format: {assistant_id}:{uuid_short}
-    Example: agent:a1b2c3d4
+    Thread IDs are pure UUIDs following LangGraph's conventions for maximum
+    compatibility (e.g., with RemoteGraph). The assistant_id is stored in
+    metadata, not embedded in the thread ID.
+
+    Example thread ID: 550e8400-e29b-41d4-a716-446655440000
 
     The current thread ID is tracked in-memory and determines which conversation
     history the LangGraph checkpointer loads.
@@ -64,15 +77,19 @@ class ThreadManager:
 
         # Create new thread
         thread_id = manager.create_thread()
+        # Returns: "550e8400-e29b-41d4-a716-446655440000"
 
         # List threads
         threads = manager.list_threads()
 
         # Switch thread
-        manager.switch_thread("agent:a1b2c3d4")
+        manager.switch_thread("550e8400-e29b-41d4-a716-446655440000")
 
         # Get current thread
         current = manager.current_thread_id
+
+        # Fork thread (requires agent for checkpoint copying)
+        new_id = manager.fork_thread(current, agent)
         ```
     """
 
@@ -121,17 +138,18 @@ class ThreadManager:
             self._initialize_default_thread()
 
     def _initialize_default_thread(self) -> None:
-        """Initialize with a default thread."""
-        default_id = f"{self.assistant_id}:main"
+        """Initialize with a default thread using a pure UUID."""
+        default_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat() + "Z"
 
         threads = [
             ThreadMetadata(
                 id=default_id,
+                assistant_id=self.assistant_id,
                 created=now,
                 last_used=now,
                 parent_id=None,
-                name="Main thread",
+                name="Default conversation",
             )
         ]
 
@@ -166,29 +184,29 @@ class ThreadManager:
             return []
 
     def create_thread(self, name: str | None = None, parent_id: str | None = None) -> str:
-        """Create a new thread.
+        """Create a new thread with a pure UUID (LangGraph standard).
 
         Args:
             name: Optional human-readable name for the thread
             parent_id: Optional parent thread ID (for forking)
 
         Returns:
-            The new thread ID in format {assistant_id}:{uuid_short}
+            The new thread ID (pure UUID)
 
         Example:
             >>> manager.create_thread()
-            'agent:a1b2c3d4'
+            '550e8400-e29b-41d4-a716-446655440000'
             >>> manager.create_thread(name="Web scraper project")
-            'agent:xyz789ab'
+            '9b2d5f7e-3c1a-4b8d-9e2f-1a3b4c5d6e7f'
         """
-        # Generate unique ID
-        uuid_short = uuid.uuid4().hex[:8]
-        thread_id = f"{self.assistant_id}:{uuid_short}"
+        # Generate pure UUID (LangGraph standard)
+        thread_id = str(uuid.uuid4())
 
         # Create metadata
         now = datetime.utcnow().isoformat() + "Z"
         metadata = ThreadMetadata(
             id=thread_id,
+            assistant_id=self.assistant_id,
             created=now,
             last_used=now,
             parent_id=parent_id,
@@ -209,13 +227,13 @@ class ThreadManager:
         """Switch to an existing thread.
 
         Args:
-            thread_id: Thread ID to switch to
+            thread_id: Thread ID to switch to (pure UUID)
 
         Raises:
             ValueError: If thread_id doesn't exist
 
         Example:
-            >>> manager.switch_thread("agent:a1b2c3d4")
+            >>> manager.switch_thread("550e8400-e29b-41d4-a716-446655440000")
         """
         threads = self._load_threads()
 
@@ -244,8 +262,8 @@ class ThreadManager:
             >>> threads = manager.list_threads()
             >>> for thread in threads:
             ...     print(f"{thread['id']}: {thread['name']}")
-            agent:a1b2c3d4: Main thread
-            agent:xyz789ab: Web scraper project
+            550e8400-e29b-41d4-a716-446655440000: Default conversation
+            9b2d5f7e-3c1a-4b8d-9e2f-1a3b4c5d6e7f: Web scraper project
         """
         threads = self._load_threads()
         # Sort by last_used, most recent first
@@ -267,29 +285,36 @@ class ThreadManager:
 
         return self.current_thread_id
 
-    def fork_thread(self, source_thread_id: str | None = None, name: str | None = None) -> str:
+    def fork_thread(
+        self,
+        agent: "CompiledGraph",
+        source_thread_id: str | None = None,
+        name: str | None = None,
+    ) -> str:
         """Fork a thread, creating a new thread with the same conversation history.
 
         The new thread will inherit all messages from the source thread up to the
         current point. Future messages will diverge between the two threads.
 
-        Note: The actual conversation copying happens at the LangGraph checkpointer
-        level when we pass the new thread_id with update_state. This method just
-        creates the metadata entry with parent tracking.
+        This method performs a true fork by:
+        1. Creating a new thread with a unique UUID
+        2. Copying the checkpoint state from the source thread to the new thread
+        3. Storing metadata linking the new thread to its parent
 
         Args:
+            agent: The compiled LangGraph agent (needed to copy checkpoint state)
             source_thread_id: Thread to fork from (defaults to current thread)
             name: Optional name for the forked thread
 
         Returns:
-            The new thread ID
+            The new thread ID (pure UUID)
 
         Raises:
             ValueError: If source_thread_id doesn't exist
 
         Example:
-            >>> new_id = manager.fork_thread()  # Fork current thread
-            >>> new_id = manager.fork_thread("agent:a1b2c3d4", "Experiment branch")
+            >>> new_id = manager.fork_thread(agent)  # Fork current thread
+            >>> new_id = manager.fork_thread(agent, "550e8400-...", "Experiment branch")
         """
         # Default to current thread
         if source_thread_id is None:
@@ -304,23 +329,51 @@ class ThreadManager:
                 f"Source thread '{source_thread_id}' not found. Available: {', '.join(available_ids)}"
             )
 
-        # Create new thread with parent tracking
-        if name is None:
-            name = f"Fork of {source_thread.get('name', source_thread_id)}"
+        # Generate new thread ID
+        new_thread_id = str(uuid.uuid4())
 
-        return self.create_thread(name=name, parent_id=source_thread_id)
+        # Copy checkpoint state from source thread to new thread
+        source_config = {"configurable": {"thread_id": source_thread_id}}
+        state = agent.get_state(source_config)
+
+        # Update state to new thread (this creates a fork in the checkpointer)
+        new_config = {"configurable": {"thread_id": new_thread_id}}
+        agent.update_state(new_config, state.values)
+
+        # Create metadata with parent tracking
+        if name is None:
+            name = f"Fork of {source_thread.get('name', 'conversation')}"
+
+        now = datetime.utcnow().isoformat() + "Z"
+        metadata = ThreadMetadata(
+            id=new_thread_id,
+            assistant_id=self.assistant_id,
+            created=now,
+            last_used=now,
+            parent_id=source_thread_id,
+            name=name,
+        )
+
+        # Add to threads list
+        threads.append(metadata)
+        self._save_threads(threads)
+
+        # Switch to new forked thread
+        self.current_thread_id = new_thread_id
+
+        return new_thread_id
 
     def get_thread_metadata(self, thread_id: str) -> ThreadMetadata | None:
         """Get metadata for a specific thread.
 
         Args:
-            thread_id: Thread ID to get metadata for
+            thread_id: Thread ID to get metadata for (pure UUID)
 
         Returns:
             Thread metadata dict, or None if not found
 
         Example:
-            >>> metadata = manager.get_thread_metadata("agent:a1b2c3d4")
+            >>> metadata = manager.get_thread_metadata("550e8400-e29b-41d4-a716-446655440000")
             >>> print(metadata['created'])
             2025-01-11T20:30:00Z
         """
@@ -331,14 +384,14 @@ class ThreadManager:
         """Rename a thread.
 
         Args:
-            thread_id: Thread ID to rename
+            thread_id: Thread ID to rename (pure UUID)
             new_name: New name for the thread
 
         Raises:
             ValueError: If thread_id doesn't exist
 
         Example:
-            >>> manager.rename_thread("agent:a1b2c3d4", "Production bugfix")
+            >>> manager.rename_thread("550e8400-e29b-41d4-a716-446655440000", "Production bugfix")
         """
         threads = self._load_threads()
 

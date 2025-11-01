@@ -17,6 +17,83 @@ This document contains critical information for working with the deepagents-cli 
 - `libs/deepagents/` - Core Deep Agents library
 - `libs/deepagents-cli/` - This CLI package
 
+## Git Workflow
+
+**Repository**: https://github.com/ASTXRTYS/DEEP-AI
+
+This is a fork of LangChain's `deepagents` repository with custom enhancements. The git remote setup allows you to:
+- Pull upstream updates from LangChain
+- Push your changes to your own repository
+
+### Remote Configuration
+
+```bash
+origin   → https://github.com/langchain-ai/deepagents.git  # LangChain upstream
+upstream → git@github.com:ASTXRTYS/DEEP-AI.git             # Your repository
+```
+
+### Common Workflows
+
+**Pull Latest Updates from LangChain**:
+```bash
+cd /Users/Jason/astxrtys/DevTools/deepagents
+
+# Fetch latest from LangChain
+git fetch origin
+
+# Merge LangChain updates into your master branch
+git checkout master
+git merge origin/master
+
+# Push merged updates to your repo
+git push upstream master
+```
+
+**Make Changes and Push to Your Repo**:
+```bash
+# Make your changes
+git add .
+git commit -m "Your commit message"
+
+# Push to your repository
+git push upstream master
+```
+
+**Sync Your Repo with LangChain (Keep Fork Updated)**:
+```bash
+# Pull LangChain updates
+git pull origin master
+
+# Resolve any conflicts if they arise
+# Then push to your repo
+git push upstream master
+```
+
+**Create Feature Branches** (Recommended for large changes):
+```bash
+# Create feature branch from master
+git checkout -b feature/my-feature
+
+# Make changes and commit
+git add .
+git commit -m "Implement my feature"
+
+# Push to your repo
+git push upstream feature/my-feature
+
+# When ready, merge to master
+git checkout master
+git merge feature/my-feature
+git push upstream master
+```
+
+### Important Notes
+
+- **origin** = LangChain's official repository (read-only for you, pull updates from here)
+- **upstream** = Your DEEP-AI repository (read-write, push your changes here)
+- Always test after merging LangChain updates to ensure compatibility
+- Your custom enhancements (thread management, etc.) are in your repo only
+
 ## Critical Architecture Decisions
 
 ### 1. Shared Agent Creation Logic
@@ -656,4 +733,4 @@ python3.11 -m pip install -e . --break-system-packages
 
 **Last Updated**: 2025-01-11
 **By**: Claude (Sonnet 4.5)
-**Session Context**: Completed thread management research and planning. Validated approach with LangGraph documentation. Updated CLAUDE.md with current behavior and planned enhancements.
+**Session Context**: Completed thread management research and planning. Created GitHub repository (DEEP-AI). Added git workflow documentation for maintaining fork while pulling LangChain updates.

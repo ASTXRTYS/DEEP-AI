@@ -10,6 +10,7 @@ from .commands import execute_bash_command, handle_command
 from .config import COLORS, DEEP_AGENTS_ASCII, SessionState, console, create_model
 from .execution import execute_task
 from .input import create_prompt_session
+from .thread_manager import ThreadManager
 from .tools import http_request, tavily_client, web_search
 from .ui import TokenTracker, show_help
 
@@ -149,7 +150,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker)
+            result = handle_command(user_input, agent, token_tracker, session_state)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -175,6 +176,11 @@ async def main(assistant_id: str, session_state):
     # Create the model (checks API keys)
     model = create_model()
 
+    # Initialize thread manager
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    thread_manager = ThreadManager(agent_dir, assistant_id)
+    session_state.thread_manager = thread_manager
+
     # Create agent with conditional tools
     tools = [http_request]
     if tavily_client is not None:
@@ -186,7 +192,6 @@ async def main(assistant_id: str, session_state):
     from .agent import get_system_prompt
     from .token_utils import calculate_baseline_tokens
 
-    agent_dir = Path.home() / ".deepagents" / assistant_id
     system_prompt = get_system_prompt()
     baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 

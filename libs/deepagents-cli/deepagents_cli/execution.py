@@ -206,9 +206,17 @@ def execute_task(
     else:
         final_input = prompt_text
 
+    # Use thread manager's current thread ID for dynamic thread switching
+    thread_id = assistant_id or "main"
+    if session_state and session_state.thread_manager:
+        thread_id = session_state.thread_manager.get_current_thread_id()
+
     config = {
-        "configurable": {"thread_id": assistant_id or "main"},
-        "metadata": {"assistant_id": assistant_id} if assistant_id else {},
+        "configurable": {"thread_id": thread_id},
+        "metadata": {
+            "assistant_id": assistant_id,
+            "thread_id": thread_id
+        } if assistant_id else {"thread_id": thread_id},
     }
 
     has_responded = False

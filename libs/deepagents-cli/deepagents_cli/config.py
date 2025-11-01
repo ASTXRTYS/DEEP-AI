@@ -43,6 +43,13 @@ COMMANDS = {
     "tokens": "Show token usage for current session",
     "quit": "Exit the CLI",
     "exit": "Exit the CLI",
+    "new": "Create a new conversation thread",
+    "threads": "List all conversation threads",
+    "threads continue <id>": "Switch to an existing thread",
+    "threads fork [name]": "Fork current thread with optional name",
+    "threads info [id]": "Show detailed thread information",
+    "threads rename <id> <name>": "Rename a thread",
+    "threads delete <id>": "Delete a thread",
 }
 
 # Common bash commands for autocomplete
@@ -77,10 +84,11 @@ console = Console(highlight=False)
 
 
 class SessionState:
-    """Holds mutable session state (auto-approve mode, etc)."""
+    """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False):
+    def __init__(self, auto_approve: bool = False, thread_manager=None):
         self.auto_approve = auto_approve
+        self.thread_manager = thread_manager
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

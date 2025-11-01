@@ -94,6 +94,62 @@ git push upstream master
 - Always test after merging LangChain updates to ensure compatibility
 - Your custom enhancements (thread management, etc.) are in your repo only
 
+---
+
+## 🚨 MANDATORY: UI Development Guardrails
+
+**CRITICAL**: Before making ANY changes to the CLI user interface, rendering, input handling, execution flow, or command system, you MUST read:
+
+**`docs/ui-architecture-and-guardrails.md`**
+
+This 600+ line document contains:
+- Complete UI architecture map (Rich library, prompt_toolkit, LangGraph streaming)
+- Critical code sections that MUST NOT be modified
+- Safe patterns for extending the UI
+- Known bugs and their fixes
+- Thread management implementation requirements
+
+### Non-Negotiable Rules
+
+**🚫 DO NOT**:
+1. **Create new Console instances** - Use the singleton from `config.py:76`
+2. **Modify dual-mode streaming** in `execution.py:292-608` - You will break HITL
+3. **Change tool call buffering** in `execution.py:491-574` - Streaming will break
+4. **Break existing key bindings** - Ctrl+T, Alt+Enter, Ctrl+E are sacred
+5. **Modify TokenTracker internals** without checking all 5+ usage sites
+6. **Touch the HITL interrupt logic** in `execution.py:311-366`
+7. **Mutate `agent.checkpointer` directly** - This is what breaks `/clear`!
+
+### Critical Bug Alert
+
+**⚠️ `/clear` command is BROKEN** (`commands.py:21`):
+```python
+# ❌ CURRENT CODE (DESTROYS PERSISTENCE):
+agent.checkpointer = InMemorySaver()
+
+# ✅ CORRECT FIX (use thread switching):
+new_thread_id = thread_manager.create_thread()
+thread_manager.switch_thread(new_thread_id)
+```
+
+The current implementation replaces SqliteSaver with InMemorySaver, **permanently destroying the persistent checkpointer**. This MUST be fixed as part of thread management implementation.
+
+### When to Read the Guardrails
+
+**Read `docs/ui-architecture-and-guardrails.md` if you need to**:
+- Add new slash commands
+- Modify rendering or output
+- Change input handling or key bindings
+- Alter execution flow or streaming
+- Extend SessionState or TokenTracker
+- Add UI elements (panels, tables, toolbars)
+- Implement thread management features
+- Fix the `/clear` bug
+
+**Summary**: The guardrails document is your safety net. Read it first, code second. Violating these rules will break the CLI in subtle, hard-to-debug ways.
+
+---
+
 ## Critical Architecture Decisions
 
 ### 1. Shared Agent Creation Logic
@@ -721,16 +777,26 @@ python3.11 -m pip install -e . --break-system-packages
 - Backward compatible - existing checkpoints untouched
 - Easy rollback via git branches
 
-**Implementation**: Phased approach on `feature/thread-management` branch
+**Implementation**: Phased approach on `Deep-AI-CLI` branch
 1. Phase 1: Core ThreadManager class (non-breaking)
 2. Phase 2: Slash commands (additive)
 3. Phase 3: Integration with execution.py (behavior change)
 4. Phase 4: Polish features (optional)
 
-**Status**: Research complete, ready to implement
+**Status**: UI guardrails documented, ready to implement Phase 1
+
+**Documentation**:
+- Thread management plan: `docs/thread-management-proposal.md` (587 lines)
+- UI architecture & guardrails: `docs/ui-architecture-and-guardrails.md` (620 lines)
 
 ---
 
 **Last Updated**: 2025-01-11
 **By**: Claude (Sonnet 4.5)
-**Session Context**: Completed thread management research and planning. Created GitHub repository (DEEP-AI). Added git workflow documentation for maintaining fork while pulling LangChain updates.
+**Session Context**:
+- Completed thread management research and planning
+- Created GitHub repository (DEEP-AI)
+- Added git workflow documentation for maintaining fork
+- Created comprehensive UI architecture and guardrails documentation
+- Added mandatory guardrails section to CLAUDE.md for future Claude instances
+- Branch: Deep-AI-CLI (ready for Phase 1 implementation)

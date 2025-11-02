@@ -320,18 +320,15 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, session_sta
             )
             console.print()
         else:
-            # Fallback to old behavior if thread manager not available
-            # (This should not happen in normal operation)
-            from langgraph.checkpoint.memory import InMemorySaver
-            agent.checkpointer = InMemorySaver()
-
+            # Thread manager not available - just clear the screen without destroying checkpointer
+            # IMPORTANT: Never replace the checkpointer with InMemorySaver as it breaks persistence
             token_tracker.reset()
             console.clear()
             console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
             console.print()
             console.print(
-                "... Fresh start! Screen cleared and conversation reset.",
-                style=COLORS["agent"]
+                "[yellow]Warning: Thread manager not available. Use /new to create a fresh thread.[/yellow]",
+                style=COLORS["dim"]
             )
             console.print()
 

@@ -9,14 +9,17 @@ from rich.console import Console
 
 dotenv.load_dotenv()
 
-# Color scheme
+# Hacker Terminal Color Scheme - Green Matrix Style
 COLORS = {
-    "primary": "#10b981",
-    "dim": "#6b7280",
-    "user": "#ffffff",
-    "agent": "#10b981",
-    "thinking": "#34d399",
-    "tool": "#fbbf24",
+    "primary": "#00ff41",      # Bright hacker green
+    "dim": "#008f11",          # Darker green for secondary text
+    "user": "#00ff41",         # User input/output in green
+    "agent": "#00ff41",        # Agent responses in green
+    "thinking": "#00cc33",     # Slightly darker green for thinking
+    "tool": "#ffff00",         # Yellow for tool outputs (warning/info)
+    "cursor": "#00ff41",       # Blinking cursor in bright green
+    "matrix_green": "#003300", # Dark background green for depth
+    "accent": "#ff6600",       # Orange accent (subtle Warhammer touch)
 }
 
 # ASCII art banner
@@ -43,13 +46,6 @@ COMMANDS = {
     "tokens": "Show token usage for current session",
     "quit": "Exit the CLI",
     "exit": "Exit the CLI",
-    "new": "Create a new conversation thread",
-    "threads": "List all conversation threads",
-    "threads continue <id>": "Switch to an existing thread",
-    "threads fork [name]": "Fork current thread with optional name",
-    "threads info [id]": "Show detailed thread information",
-    "threads rename <id> <name>": "Rename a thread",
-    "threads delete <id>": "Delete a thread",
 }
 
 # Common bash commands for autocomplete
@@ -84,11 +80,10 @@ console = Console(highlight=False)
 
 
 class SessionState:
-    """Holds mutable session state (auto-approve mode, thread manager, etc)."""
+    """Holds mutable session state (auto-approve mode, etc)."""
 
-    def __init__(self, auto_approve: bool = False, thread_manager=None):
+    def __init__(self, auto_approve: bool = False):
         self.auto_approve = auto_approve
-        self.thread_manager = thread_manager
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

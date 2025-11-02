@@ -125,7 +125,7 @@ class BashCompleter(Completer):
 
 def parse_file_mentions(text: str) -> tuple[str, list[Path]]:
     """Extract @file mentions and return cleaned text with resolved file paths."""
-    pattern = r"@((?:[^\s@]|(?<=\\)\s)+)"  # Match @filename, allowing escaped spaces
+    pattern = r"@((?:[^\s@]|(?<=\\) )+)"  # Match @filename, allowing escaped spaces
     matches = re.findall(pattern, text)
 
     files = []
@@ -232,9 +232,20 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         }
     )
 
-    # Create the session
+    # Define hacker terminal styling
+    hacker_style = Style.from_dict(
+        {
+            "": f"fg:{COLORS['user']} bg:{COLORS['matrix_green']}",  # Default text in hacker green
+            "prompt": f"fg:{COLORS['primary']} bold",  # Prompt in bright green
+            "bottom-toolbar": f"bg:{COLORS['matrix_green']} fg:{COLORS['primary']}",  # Dark green toolbar with green text
+            "toolbar-green": f"bg:{COLORS['primary']} #000000",  # Green for auto-accept ON
+            "toolbar-orange": f"bg:{COLORS['accent']} #000000",  # Orange accent for manual accept
+        }
+    )
+
+    # Create the session with hacker terminal styling
     session = PromptSession(
-        message=HTML(f'<style fg="{COLORS["user"]}">></style> '),
+        message=HTML(f'<style fg="{COLORS["primary"]}" bold>></style> <style fg="{COLORS["user"]}">terminal@system</style>'),
         multiline=True,  # Keep multiline support but Enter submits
         key_bindings=kb,
         completer=merge_completers([CommandCompleter(), BashCompleter(), FilePathCompleter()]),
@@ -243,7 +254,7 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         mouse_support=False,
         enable_open_in_editor=True,  # Allow Ctrl+X Ctrl+E to open external editor
         bottom_toolbar=get_bottom_toolbar(session_state),  # Persistent status bar at bottom
-        style=toolbar_style,  # Apply toolbar styling
+        style=hacker_style,  # Apply hacker terminal styling
     )
 
     return session

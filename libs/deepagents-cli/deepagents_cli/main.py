@@ -8,9 +8,8 @@ from pathlib import Path
 from .agent import create_agent_with_config, list_agents, reset_agent
 from .commands import execute_bash_command, handle_command
 from .config import COLORS, DEEP_AGENTS_ASCII, SessionState, console, create_model
-from .execution import execute_task
+from .execution import execute_task, hacker_cursor
 from .input import create_prompt_session
-from .thread_manager import ThreadManager
 from .tools import http_request, tavily_client, web_search
 from .ui import TokenTracker, show_help
 
@@ -136,21 +135,36 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
     while True:
         try:
+            # Start blinking cursor for hacker terminal feel
+            hacker_cursor.start_blinking()
+            
+            # Display hacker-style prompt
+            console.print(f"[{COLORS['primary']}]>[/] ", end="", markup=False)
+            hacker_cursor.print_cursor()
+            
             user_input = await session.prompt_async()
             user_input = user_input.strip()
         except EOFError:
             break
         except KeyboardInterrupt:
             # Ctrl+C at prompt - exit the program
+            hacker_cursor.stop_blinking()
             console.print("\n\nGoodbye!", style=COLORS["primary"])
             break
 
+        # Stop blinking cursor after getting input
+        hacker_cursor.stop_blinking()
+        
         if not user_input:
             continue
+        
+        # Display user input in hacker green
+        console.print(f"\n[{COLORS['user']}]{user_input}[/]", style=f"dim {COLORS['dim']}")
+        console.print(f"\n[{COLORS['primary']}]⚡ Executing... [{COLORS['thinking']}]agent[/] ⚡")
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker, session_state)
+            result = handle_command(user_input, agent, token_tracker)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -176,11 +190,6 @@ async def main(assistant_id: str, session_state):
     # Create the model (checks API keys)
     model = create_model()
 
-    # Initialize thread manager
-    agent_dir = Path.home() / ".deepagents" / assistant_id
-    thread_manager = ThreadManager(agent_dir, assistant_id)
-    session_state.thread_manager = thread_manager
-
     # Create agent with conditional tools
     tools = [http_request]
     if tavily_client is not None:
@@ -192,6 +201,7 @@ async def main(assistant_id: str, session_state):
     from .agent import get_system_prompt
     from .token_utils import calculate_baseline_tokens
 
+    agent_dir = Path.home() / ".deepagents" / assistant_id
     system_prompt = get_system_prompt()
     baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 

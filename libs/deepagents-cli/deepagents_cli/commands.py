@@ -273,16 +273,204 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
     # /threads delete <id>
     elif subcommand == "delete":
+        if not subargs:
+            console.print()
+            console.print("[yellow]Usage: /threads delete <id>[/yellow]")
+            console.print()
+            return True
+
+        try:
+            thread, _ = find_thread_by_partial_id(thread_manager, subargs)
+            thread_name = thread.get('name') or '(unnamed)'
+            thread_id_short = thread['id'][:8]
+
+            # Confirm deletion
+            console.print()
+            console.print(f"[yellow]⚠️  Delete thread:[/yellow] {thread_name} ({thread_id_short})")
+            console.print(f"[dim]Created: {relative_time(thread.get('created', ''))}[/dim]")
+            console.print()
+
+            response = console.input("[yellow]Are you sure? This cannot be undone. (yes/no): [/yellow]")
+            console.print()
+
+            if response.lower() not in ['yes', 'y']:
+                console.print("[dim]Deletion cancelled.[/dim]")
+                console.print()
+                return True
+
+            # Delete the thread
+            thread_manager.delete_thread(thread['id'], agent)
+
+            console.print(
+                f"[{COLORS['primary']}]✓ Deleted thread: {thread_name} ({thread_id_short})[/{COLORS['primary']}]"
+            )
+            console.print()
+        except ValueError as e:
+            console.print()
+            console.print(f"[red]Error: {e}[/red]")
+            console.print()
+
+        return True
+
+    # /threads cleanup [--days N]
+    elif subcommand == "cleanup":
+        # Parse --days flag or use default
+        days_old = 30
+        if subargs.startswith("--days"):
+            parts = subargs.split()
+            if len(parts) >= 2:
+                try:
+                    days_old = int(parts[1])
+                except ValueError:
+                    console.print()
+                    console.print("[red]Error: --days must be followed by a number[/red]")
+                    console.print("[yellow]Usage: /threads cleanup [--days N][/yellow]")
+                    console.print()
+                    return True
+
+        # Dry run to show what would be deleted
         console.print()
-        console.print("[yellow]Thread deletion not yet implemented.[/yellow]")
-        console.print("[dim]This feature requires additional safety checks and will be added in Phase 3.[/dim]")
+        console.print(f"[dim]Checking for threads older than {days_old} days...[/dim]")
+
+        try:
+            count, names = thread_manager.cleanup_old_threads(days_old, agent, dry_run=True)
+        except Exception as e:
+            console.print()
+            console.print(f"[red]Error checking threads: {e}[/red]")
+            console.print()
+            return True
+
+        if count == 0:
+            console.print()
+            console.print(f"[{COLORS['primary']}]✓ No threads older than {days_old} days found.[/{COLORS['primary']}]")
+            console.print()
+            return True
+
+        # Show preview
         console.print()
+        console.print(f"[yellow]⚠️  Will delete {count} thread(s) older than {days_old} days:[/yellow]")
+        for name in names[:10]:  # Show first 10
+            console.print(f"  • {name}")
+        if count > 10:
+            console.print(f"  ... and {count - 10} more")
+        console.print()
+
+        response = console.input("[yellow]Proceed with deletion? (yes/no): [/yellow]")
+        console.print()
+
+        if response.lower() not in ['yes', 'y']:
+            console.print("[dim]Cleanup cancelled.[/dim]")
+            console.print()
+            return True
+
+        # Actually delete
+        try:
+            count, names = thread_manager.cleanup_old_threads(days_old, agent, dry_run=False)
+            console.print(
+                f"[{COLORS['primary']}]✓ Deleted {count} thread(s)[/{COLORS['primary']}]"
+            )
+            console.print(f"[dim]Tip: Run /threads vacuum to reclaim disk space[/dim]")
+            console.print()
+        except Exception as e:
+            console.print()
+            console.print(f"[red]Error during cleanup: {e}[/red]")
+            console.print()
+
+        return True
+
+    # /threads vacuum
+    elif subcommand == "vacuum":
+        console.print()
+        console.print("[dim]Vacuuming database to reclaim disk space...[/dim]")
+
+        try:
+            result = thread_manager.vacuum_database()
+            size_before = result['size_before']
+            size_after = result['size_after']
+            reclaimed = size_before - size_after
+
+            # Format sizes
+            def format_bytes(b):
+                if b < 1024:
+                    return f"{b}B"
+                elif b < 1024 * 1024:
+                    return f"{b / 1024:.1f}KB"
+                else:
+                    return f"{b / (1024 * 1024):.1f}MB"
+
+            console.print()
+            console.print(
+                f"[{COLORS['primary']}]✓ Vacuum complete[/{COLORS['primary']}]"
+            )
+            console.print(f"  Before: {format_bytes(size_before)}")
+            console.print(f"  After:  {format_bytes(size_after)}")
+            if reclaimed > 0:
+                console.print(f"  Reclaimed: {format_bytes(reclaimed)}")
+            else:
+                console.print("  No space reclaimed (database was already compact)")
+            console.print()
+        except Exception as e:
+            console.print()
+            console.print(f"[red]Error during vacuum: {e}[/red]")
+            console.print()
+
+        return True
+
+    # /threads stats
+    elif subcommand == "stats":
+        console.print()
+        console.print("[dim]Gathering database statistics...[/dim]")
+
+        try:
+            stats = thread_manager.get_database_stats()
+
+            # Format size
+            def format_bytes(b):
+                if b < 1024:
+                    return f"{b}B"
+                elif b < 1024 * 1024:
+                    return f"{b / 1024:.1f}KB"
+                else:
+                    return f"{b / (1024 * 1024):.1f}MB"
+
+            # Build stats panel
+            stats_text = f"""[bold]Threads:[/bold] {stats['thread_count']}
+[bold]Checkpoints:[/bold] {stats['checkpoint_count']}
+[bold]Database Size:[/bold] {format_bytes(stats['db_size_bytes'])}"""
+
+            if stats['oldest_thread']:
+                oldest = stats['oldest_thread']
+                stats_text += f"\n\n[bold]Oldest Thread:[/bold]\n  {oldest.get('name') or '(unnamed)'} ({oldest['id'][:8]})\n  Created: {relative_time(oldest.get('created', ''))}"
+
+            if stats['newest_thread']:
+                newest = stats['newest_thread']
+                stats_text += f"\n\n[bold]Newest Thread:[/bold]\n  {newest.get('name') or '(unnamed)'} ({newest['id'][:8]})\n  Created: {relative_time(newest.get('created', ''))}"
+
+            # Average checkpoints per thread
+            if stats['thread_count'] > 0:
+                avg_checkpoints = stats['checkpoint_count'] / stats['thread_count']
+                stats_text += f"\n\n[bold]Avg Checkpoints/Thread:[/bold] {avg_checkpoints:.1f}"
+
+            panel = Panel(
+                stats_text,
+                title="Database Statistics",
+                border_style=COLORS['primary']
+            )
+
+            console.print()
+            console.print(panel)
+            console.print()
+        except Exception as e:
+            console.print()
+            console.print(f"[red]Error gathering stats: {e}[/red]")
+            console.print()
+
         return True
 
     else:
         console.print()
         console.print(f"[yellow]Unknown threads subcommand: {subcommand}[/yellow]")
-        console.print("[dim]Available: continue, fork, info, rename[/dim]")
+        console.print("[dim]Available: continue, fork, info, rename, delete, cleanup, vacuum, stats[/dim]")
         console.print()
         return True
 

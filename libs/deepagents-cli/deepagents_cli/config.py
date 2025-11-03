@@ -49,7 +49,10 @@ COMMANDS = {
     "threads fork [name]": "Fork current thread with optional name",
     "threads info [id]": "Show detailed thread information",
     "threads rename <id> <name>": "Rename a thread",
-    "threads delete <id>": "Delete a thread",
+    "threads delete <id>": "Delete a thread (requires confirmation)",
+    "threads cleanup [--days N]": "Delete threads older than N days (default: 30)",
+    "threads vacuum": "Reclaim disk space from deleted threads",
+    "threads stats": "Show database statistics (threads, checkpoints, size)",
 }
 
 # Common bash commands for autocomplete

@@ -402,3 +402,211 @@ class ThreadManager:
 
         thread["name"] = new_name
         self._save_threads(threads)
+
+    def delete_thread(self, thread_id: str, agent: "CompiledGraph") -> None:
+        """Delete a thread, removing both metadata and checkpoints.
+
+        This permanently deletes the thread from threads.json metadata and
+        removes all checkpoints from the checkpointer database.
+
+        Args:
+            thread_id: Thread ID to delete (pure UUID)
+            agent: The compiled LangGraph agent (needed to access checkpointer)
+
+        Raises:
+            ValueError: If thread_id doesn't exist or is the current thread
+
+        Example:
+            >>> manager.delete_thread("550e8400-e29b-41d4-a716-446655440000", agent)
+        """
+        # Prevent deleting current thread
+        if thread_id == self.current_thread_id:
+            raise ValueError(
+                "Cannot delete the current thread. Switch to another thread first with "
+                "'/threads continue <id>' or create a new thread with '/new'"
+            )
+
+        threads = self._load_threads()
+
+        # Find thread
+        thread = next((t for t in threads if t["id"] == thread_id), None)
+        if not thread:
+            available_ids = [t["id"] for t in threads]
+            raise ValueError(
+                f"Thread '{thread_id}' not found. Available threads: {', '.join(available_ids)}"
+            )
+
+        # Remove from metadata
+        threads = [t for t in threads if t["id"] != thread_id]
+        self._save_threads(threads)
+
+        # Delete checkpoints from database
+        try:
+            agent.checkpointer.delete_thread(thread_id)
+        except AttributeError:
+            # Checkpointer doesn't have delete_thread method
+            pass
+
+    def cleanup_old_threads(
+        self, days_old: int, agent: "CompiledGraph", dry_run: bool = False
+    ) -> tuple[int, list[str]]:
+        """Delete threads older than specified days.
+
+        Args:
+            days_old: Delete threads not used in this many days
+            agent: The compiled LangGraph agent (needed to access checkpointer)
+            dry_run: If True, only return what would be deleted without deleting
+
+        Returns:
+            Tuple of (count of deleted threads, list of deleted thread names)
+
+        Example:
+            >>> count, names = manager.cleanup_old_threads(30, agent)
+            >>> print(f"Deleted {count} threads: {', '.join(names)}")
+        """
+        from datetime import datetime, timedelta, timezone
+
+        threads = self._load_threads()
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_old)
+
+        # Find threads to delete
+        threads_to_delete = []
+        for thread in threads:
+            # Skip current thread
+            if thread["id"] == self.current_thread_id:
+                continue
+
+            # Parse last_used timestamp (handles both with and without 'Z' suffix)
+            last_used_str = thread.get("last_used", "")
+            if last_used_str.endswith("Z"):
+                last_used_str = last_used_str[:-1]
+
+            try:
+                last_used = datetime.fromisoformat(last_used_str).replace(tzinfo=timezone.utc)
+                if last_used < cutoff_date:
+                    threads_to_delete.append(thread)
+            except (ValueError, AttributeError):
+                # Invalid timestamp, skip this thread
+                continue
+
+        # If dry run, just return what would be deleted
+        if dry_run:
+            return len(threads_to_delete), [t.get("name", t["id"]) for t in threads_to_delete]
+
+        # Actually delete threads
+        deleted_names = []
+        for thread in threads_to_delete:
+            try:
+                # Don't use self.delete_thread to avoid current thread check
+                thread_id = thread["id"]
+
+                # Remove from metadata
+                threads = [t for t in threads if t["id"] != thread_id]
+
+                # Delete checkpoints
+                try:
+                    agent.checkpointer.delete_thread(thread_id)
+                except AttributeError:
+                    pass
+
+                deleted_names.append(thread.get("name", thread_id))
+            except Exception:
+                # If deletion fails, continue with others
+                continue
+
+        # Save updated metadata
+        self._save_threads(threads)
+
+        return len(deleted_names), deleted_names
+
+    def vacuum_database(self) -> dict[str, int]:
+        """Vacuum the SQLite checkpointer database to reclaim disk space.
+
+        This operation compacts the database file by removing deleted data
+        and reorganizing the file structure. Should be run after bulk deletions.
+
+        Returns:
+            Dict with 'size_before' and 'size_after' in bytes
+
+        Example:
+            >>> result = manager.vacuum_database()
+            >>> print(f"Reclaimed {result['size_before'] - result['size_after']} bytes")
+        """
+        import sqlite3
+
+        checkpoint_db = self.agent_dir / "checkpoints.db"
+
+        # Get size before
+        size_before = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
+
+        # Run VACUUM
+        try:
+            conn = sqlite3.connect(str(checkpoint_db))
+            conn.execute("VACUUM")
+            conn.close()
+        except Exception:
+            # If vacuum fails, return original size
+            return {"size_before": size_before, "size_after": size_before}
+
+        # Get size after
+        size_after = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
+
+        return {"size_before": size_before, "size_after": size_after}
+
+    def get_database_stats(self) -> dict:
+        """Get statistics about the checkpointer database.
+
+        Returns:
+            Dict with database statistics:
+            - thread_count: Number of threads in metadata
+            - checkpoint_count: Number of checkpoints in database
+            - db_size_bytes: Size of checkpoints.db file
+            - oldest_thread: Oldest thread info (id, name, created)
+            - newest_thread: Newest thread info (id, name, created)
+
+        Example:
+            >>> stats = manager.get_database_stats()
+            >>> print(f"Threads: {stats['thread_count']}, Checkpoints: {stats['checkpoint_count']}")
+        """
+        import sqlite3
+
+        threads = self._load_threads()
+        checkpoint_db = self.agent_dir / "checkpoints.db"
+
+        # Count checkpoints in database
+        checkpoint_count = 0
+        if checkpoint_db.exists():
+            try:
+                conn = sqlite3.connect(str(checkpoint_db))
+                cursor = conn.execute("SELECT COUNT(*) FROM checkpoints")
+                checkpoint_count = cursor.fetchone()[0]
+                conn.close()
+            except Exception:
+                checkpoint_count = 0
+
+        # Database file size
+        db_size_bytes = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
+
+        # Find oldest and newest threads
+        oldest_thread = None
+        newest_thread = None
+        if threads:
+            threads_sorted = sorted(threads, key=lambda t: t.get("created", ""))
+            oldest_thread = {
+                "id": threads_sorted[0]["id"],
+                "name": threads_sorted[0].get("name"),
+                "created": threads_sorted[0].get("created"),
+            }
+            newest_thread = {
+                "id": threads_sorted[-1]["id"],
+                "name": threads_sorted[-1].get("name"),
+                "created": threads_sorted[-1].get("created"),
+            }
+
+        return {
+            "thread_count": len(threads),
+            "checkpoint_count": checkpoint_count,
+            "db_size_bytes": db_size_bytes,
+            "oldest_thread": oldest_thread,
+            "newest_thread": newest_thread,
+        }

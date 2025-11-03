@@ -88,11 +88,25 @@ deepagents help
 ```
 
 ### In-Session Commands
+
+**General**:
 - `/help` - Show help
 - `/tokens` - Show token usage
 - `/clear` - Clear conversation
 - `!command` - Execute shell command
 - `quit`, `exit`, `q` - Exit
+
+**Thread Management**:
+- `/new [name]` - Create new thread
+- `/threads` - List all threads
+- `/threads continue <id>` - Switch to thread
+- `/threads fork [name]` - Fork current thread
+- `/threads info [id]` - Show thread details
+- `/threads rename <id> <name>` - Rename thread
+- `/threads delete <id>` - Delete thread (with confirmation)
+- `/threads cleanup [--days N]` - Delete threads older than N days (default: 30)
+- `/threads vacuum` - Reclaim disk space from deleted threads
+- `/threads stats` - Show database statistics
 
 ### Memory System
 
@@ -110,6 +124,31 @@ Stored in: `~/.deepagents/{agent_name}/`
 **Conversation Memory**: Automatically saved, resume with same agent name
 
 **Long-term Store**: Shared knowledge across all conversations (PostgreSQL)
+
+### Thread Cleanup & Maintenance
+
+**Automatic Cleanup (Server Mode Only)**:
+- When running with LangGraph server (`./start-dev.sh`), threads older than 14 days are automatically deleted
+- Cleanup runs every 2 hours in the background
+- **Note**: Standalone CLI (`deepagents`) does NOT run automatic cleanup
+
+**Manual Cleanup (All Modes)**:
+```bash
+# Check database size and thread count
+/threads stats
+
+# Delete threads older than 30 days
+/threads cleanup --days 30
+
+# Reclaim disk space after deletions
+/threads vacuum
+```
+
+**Best Practices**:
+- **CLI-only users**: Run `/threads cleanup --days 14` every 1-2 weeks
+- **Server users**: Automatic cleanup handles new threads, use `/threads cleanup` for old threads
+- Run `/threads vacuum` after bulk deletions to reclaim disk space
+- Monitor with `/threads stats` regularly
 
 ## LangGraph Studio
 

@@ -1,5 +1,6 @@
 import sqlite3
 import uuid
+from unittest.mock import patch
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -29,7 +30,13 @@ def _insert_checkpoint(db_path, thread_id: str) -> None:
     conn.close()
 
 
-def test_touch_thread_updates_last_used(tmp_path):
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_touch_thread_updates_last_used(mock_fork, mock_create, tmp_path):
+    # Mock server calls to return unique UUIDs
+    mock_create.side_effect = lambda name=None, **kwargs: str(uuid.uuid4())
+    mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
+
     agent_dir = tmp_path / "agent"
     manager = ThreadManager(agent_dir, "tester")
 
@@ -44,7 +51,13 @@ def test_touch_thread_updates_last_used(tmp_path):
     assert after["last_used"] >= before["last_used"]
 
 
-def test_reconcile_adds_missing_metadata(tmp_path):
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_reconcile_adds_missing_metadata(mock_fork, mock_create, tmp_path):
+    # Mock server calls to return unique UUIDs
+    mock_create.side_effect = lambda name=None, **kwargs: str(uuid.uuid4())
+    mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
+
     agent_dir = tmp_path / "agent"
     manager = ThreadManager(agent_dir, "tester")
 
@@ -60,7 +73,12 @@ def test_reconcile_adds_missing_metadata(tmp_path):
     assert manager.get_thread_metadata(missing_id) is not None
 
 
-def test_reconcile_removes_stale_metadata(tmp_path):
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_reconcile_removes_stale_metadata(mock_fork, mock_create, tmp_path):
+    # Mock server calls to return unique UUIDs
+    mock_create.side_effect = lambda name=None, **kwargs: str(uuid.uuid4())
+    mock_fork.side_effect = lambda thread_id, **kwargs: str(uuid.uuid4())
     agent_dir = tmp_path / "agent"
     manager = ThreadManager(agent_dir, "tester")
 
@@ -81,7 +99,12 @@ def test_reconcile_removes_stale_metadata(tmp_path):
     assert manager.get_thread_metadata(stale_id) is None
 
 
-def test_reconcile_preserves_recent_metadata(tmp_path):
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_reconcile_preserves_recent_metadata(mock_fork, mock_create, tmp_path):
+    # Mock server calls to return unique UUIDs
+    mock_create.side_effect = lambda name=None, **kwargs: str(uuid.uuid4())
+    mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
     agent_dir = tmp_path / "agent"
     manager = ThreadManager(agent_dir, "tester")
 

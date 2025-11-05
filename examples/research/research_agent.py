@@ -1,3 +1,5 @@
+"""Research agent example using web search capabilities."""
+
 import os
 from typing import Literal
 
@@ -13,9 +15,10 @@ def internet_search(
     query: str,
     max_results: int = 5,
     topic: Literal["general", "news", "finance"] = "general",
+    *,
     include_raw_content: bool = False,
-):
-    """Run a web search"""
+) -> str:
+    """Run a web search."""
     search_docs = tavily_client.search(
         query,
         max_results=max_results,

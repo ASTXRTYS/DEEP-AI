@@ -53,7 +53,8 @@ dev = [
 
 lint = [
     "ruff",
-    "mypy"
+    "mypy",
+    "types-requests"
 ]
 
 [build-system]

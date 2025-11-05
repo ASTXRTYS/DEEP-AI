@@ -194,10 +194,9 @@ def execute_task(
 
     config = {
         "configurable": {"thread_id": thread_id},
-        "metadata": {
-            "assistant_id": assistant_id,
-            "thread_id": thread_id
-        } if assistant_id else {"thread_id": thread_id},
+        "metadata": {"assistant_id": assistant_id, "thread_id": thread_id}
+        if assistant_id
+        else {"thread_id": thread_id},
     }
 
     has_responded = False

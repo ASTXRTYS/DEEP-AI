@@ -31,7 +31,7 @@ def relative_time(iso_timestamp: str) -> str:
     """
     try:
         # Parse ISO timestamp (with or without 'Z')
-        ts_str = iso_timestamp.rstrip('Z')
+        ts_str = iso_timestamp.rstrip("Z")
         ts = datetime.fromisoformat(ts_str)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -72,13 +72,13 @@ def find_thread_by_partial_id(thread_manager, partial_id: str):
         ValueError: If no matches or multiple ambiguous matches
     """
     threads = thread_manager.list_threads()
-    matches = [t for t in threads if t['id'].startswith(partial_id)]
+    matches = [t for t in threads if t["id"].startswith(partial_id)]
 
     if not matches:
         raise ValueError(f"No thread found matching '{partial_id}'")
 
     if len(matches) > 1:
-        match_ids = [t['id'][:8] for t in matches]
+        match_ids = [t["id"][:8] for t in matches]
         raise ValueError(
             f"Ambiguous thread ID '{partial_id}' - matches multiple threads: {', '.join(match_ids)}\n"
             f"Please provide more characters to uniquely identify the thread."
@@ -275,24 +275,24 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             title="Available Threads",
             show_header=True,
             header_style=f"bold {COLORS['primary']}",
-            border_style=COLORS['dim']
+            border_style=COLORS["dim"],
         )
 
         table.add_column("", width=2)  # Current thread indicator
-        table.add_column("ID", style=COLORS['primary'], width=10)
+        table.add_column("ID", style=COLORS["primary"], width=10)
         table.add_column("Name", style="white")
-        table.add_column("Tokens", style=COLORS['accent'], width=12, justify="right")
-        table.add_column("Created", style=COLORS['dim'], width=12)
-        table.add_column("Last Used", style=COLORS['dim'], width=12)
+        table.add_column("Tokens", style=COLORS["accent"], width=12, justify="right")
+        table.add_column("Created", style=COLORS["dim"], width=12)
+        table.add_column("Last Used", style=COLORS["dim"], width=12)
 
         for thread in threads:
-            is_current = thread['id'] == current_id
+            is_current = thread["id"] == current_id
             indicator = "→" if is_current else ""
-            thread_id_short = thread['id'][:8]
-            name = thread.get('name') or "(unnamed)"
-            token_count = thread.get('token_count', 0)
-            created = relative_time(thread.get('created', ''))
-            last_used = relative_time(thread.get('last_used', ''))
+            thread_id_short = thread["id"][:8]
+            name = thread.get("name") or "(unnamed)"
+            token_count = thread.get("token_count", 0)
+            created = relative_time(thread.get("created", ""))
+            last_used = relative_time(thread.get("last_used", ""))
 
             # Highlight current thread row
             style = "bold" if is_current else None
@@ -304,15 +304,13 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
                 f"{token_count:,}",
                 created,
                 last_used,
-                style=style
+                style=style,
             )
 
         console.print()
         console.print(table)
         console.print()
-        console.print(
-            "[dim]Tip: Use /threads to open the picker[/dim]"
-        )
+        console.print("[dim]Tip: Use /threads to open the picker[/dim]")
         console.print()
         return True
 
@@ -333,7 +331,9 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
             console.print()
             try:
-                target_id = _select_thread_interactively(enriched_threads, thread_manager.get_current_thread_id())
+                target_id = _select_thread_interactively(
+                    enriched_threads, thread_manager.get_current_thread_id()
+                )
             except KeyboardInterrupt:
                 console.print("\n[red]Thread selection interrupted.[/red]")
                 console.print()
@@ -348,7 +348,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         try:
             thread, _ = find_thread_by_partial_id(thread_manager, target_id)
-            thread_manager.switch_thread(thread['id'])
+            thread_manager.switch_thread(thread["id"])
 
             console.print()
             console.print(
@@ -373,7 +373,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             new_id = thread_manager.fork_thread(agent, source_thread_id=current_id, name=name)
 
             # Compute display name outside f-string to avoid nested f-string syntax error
-            current_name = current_thread.get('name') or '(unnamed)'
+            current_name = current_thread.get("name") or "(unnamed)"
             fork_name = name or f"Fork of {current_thread.get('name', 'conversation')}"
 
             console.print()
@@ -407,17 +407,15 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
                 return True
 
             # Build info panel
-            info_text = f"""[bold]Thread ID:[/bold] {thread['id']}
-[bold]Name:[/bold] {thread.get('name') or '(unnamed)'}
-[bold]Created:[/bold] {thread.get('created', 'Unknown')}
-[bold]Last Used:[/bold] {thread.get('last_used', 'Unknown')}
-[bold]Parent:[/bold] {thread.get('parent_id') or 'None (original thread)'}
-[bold]Assistant:[/bold] {thread.get('assistant_id', 'Unknown')}"""
+            info_text = f"""[bold]Thread ID:[/bold] {thread["id"]}
+[bold]Name:[/bold] {thread.get("name") or "(unnamed)"}
+[bold]Created:[/bold] {thread.get("created", "Unknown")}
+[bold]Last Used:[/bold] {thread.get("last_used", "Unknown")}
+[bold]Parent:[/bold] {thread.get("parent_id") or "None (original thread)"}
+[bold]Assistant:[/bold] {thread.get("assistant_id", "Unknown")}"""
 
             panel = Panel(
-                info_text,
-                title=f"Thread Info: {thread['id'][:8]}",
-                border_style=COLORS['primary']
+                info_text, title=f"Thread Info: {thread['id'][:8]}", border_style=COLORS["primary"]
             )
 
             console.print()
@@ -450,9 +448,9 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         try:
             thread, _ = find_thread_by_partial_id(thread_manager, partial_id)
-            old_name = thread.get('name') or '(unnamed)'
+            old_name = thread.get("name") or "(unnamed)"
 
-            thread_manager.rename_thread(thread['id'], new_name)
+            thread_manager.rename_thread(thread["id"], new_name)
 
             console.print()
             console.print(
@@ -476,8 +474,8 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         try:
             thread, _ = find_thread_by_partial_id(thread_manager, subargs)
-            thread_name = thread.get('name') or '(unnamed)'
-            thread_id_short = thread['id'][:8]
+            thread_name = thread.get("name") or "(unnamed)"
+            thread_id_short = thread["id"][:8]
 
             # Confirm deletion
             console.print()
@@ -485,16 +483,18 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             console.print(f"[dim]Created: {relative_time(thread.get('created', ''))}[/dim]")
             console.print()
 
-            response = console.input("[yellow]Are you sure? This cannot be undone. (yes/no): [/yellow]")
+            response = console.input(
+                "[yellow]Are you sure? This cannot be undone. (yes/no): [/yellow]"
+            )
             console.print()
 
-            if response.lower() not in ['yes', 'y']:
+            if response.lower() not in ["yes", "y"]:
                 console.print("[dim]Deletion cancelled.[/dim]")
                 console.print()
                 return True
 
             # Delete the thread
-            thread_manager.delete_thread(thread['id'], agent)
+            thread_manager.delete_thread(thread["id"], agent)
 
             console.print(
                 f"[{COLORS['primary']}]✓ Deleted thread: {thread_name} ({thread_id_short})[/{COLORS['primary']}]"
@@ -537,13 +537,17 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         if count == 0:
             console.print()
-            console.print(f"[{COLORS['primary']}]✓ No threads older than {days_old} days found.[/{COLORS['primary']}]")
+            console.print(
+                f"[{COLORS['primary']}]✓ No threads older than {days_old} days found.[/{COLORS['primary']}]"
+            )
             console.print()
             return True
 
         # Show preview
         console.print()
-        console.print(f"[yellow]⚠️  Will delete {count} thread(s) older than {days_old} days:[/yellow]")
+        console.print(
+            f"[yellow]⚠️  Will delete {count} thread(s) older than {days_old} days:[/yellow]"
+        )
         for name in names[:10]:  # Show first 10
             console.print(f"  • {name}")
         if count > 10:
@@ -553,7 +557,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         response = console.input("[yellow]Proceed with deletion? (yes/no): [/yellow]")
         console.print()
 
-        if response.lower() not in ['yes', 'y']:
+        if response.lower() not in ["yes", "y"]:
             console.print("[dim]Cleanup cancelled.[/dim]")
             console.print()
             return True
@@ -561,9 +565,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         # Actually delete
         try:
             count, names = thread_manager.cleanup_old_threads(days_old, agent, dry_run=False)
-            console.print(
-                f"[{COLORS['primary']}]✓ Deleted {count} thread(s)[/{COLORS['primary']}]"
-            )
+            console.print(f"[{COLORS['primary']}]✓ Deleted {count} thread(s)[/{COLORS['primary']}]")
             console.print(f"[dim]Tip: Run /threads vacuum to reclaim disk space[/dim]")
             console.print()
         except Exception as e:
@@ -588,7 +590,9 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         if not preview.pending_changes:
             console.print()
-            console.print(f"[{COLORS['primary']}]✓ Threads are already in sync.[/{COLORS['primary']}]")
+            console.print(
+                f"[{COLORS['primary']}]✓ Threads are already in sync.[/{COLORS['primary']}]"
+            )
             console.print()
             return True
 
@@ -596,7 +600,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         if preview.metadata_only:
             console.print("[yellow]Metadata with no matching checkpoints:[/yellow]")
             for thread in preview.metadata_only[:10]:
-                name = thread.get('name') or '(unnamed)'
+                name = thread.get("name") or "(unnamed)"
                 console.print(f"  • {name} ({thread['id'][:8]})")
             if len(preview.metadata_only) > 10:
                 console.print(f"  ... and {len(preview.metadata_only) - 10} more")
@@ -618,7 +622,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         response = console.input("[yellow]Apply fixes? (yes/no): [/yellow]")
         console.print()
 
-        if response.lower() not in ['yes', 'y']:
+        if response.lower() not in ["yes", "y"]:
             console.print("[dim]Sync cancelled.[/dim]")
             console.print()
             return True
@@ -635,13 +639,13 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         if result.removed:
             console.print("  Removed metadata entries:")
             for thread in result.removed:
-                name = thread.get('name') or '(unnamed)'
+                name = thread.get("name") or "(unnamed)"
                 console.print(f"    • {name} ({thread['id'][:8]})")
 
         if result.added:
             console.print("  Recovered threads from checkpoints:")
             for thread in result.added:
-                name = thread.get('name') or '(unnamed)'
+                name = thread.get("name") or "(unnamed)"
                 console.print(f"    • {name} ({thread['id'][:8]})")
 
         if result.current_thread_changed and result.new_current_thread_id:
@@ -660,8 +664,8 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         try:
             result = thread_manager.vacuum_database()
-            size_before = result['size_before']
-            size_after = result['size_after']
+            size_before = result["size_before"]
+            size_after = result["size_after"]
             reclaimed = size_before - size_after
 
             # Format sizes
@@ -674,9 +678,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
                     return f"{b / (1024 * 1024):.1f}MB"
 
             console.print()
-            console.print(
-                f"[{COLORS['primary']}]✓ Vacuum complete[/{COLORS['primary']}]"
-            )
+            console.print(f"[{COLORS['primary']}]✓ Vacuum complete[/{COLORS['primary']}]")
             console.print(f"  Before: {format_bytes(size_before)}")
             console.print(f"  After:  {format_bytes(size_after)}")
             if reclaimed > 0:
@@ -709,28 +711,24 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
                     return f"{b / (1024 * 1024):.1f}MB"
 
             # Build stats panel
-            stats_text = f"""[bold]Threads:[/bold] {stats['thread_count']}
-[bold]Checkpoints:[/bold] {stats['checkpoint_count']}
-[bold]Database Size:[/bold] {format_bytes(stats['db_size_bytes'])}"""
+            stats_text = f"""[bold]Threads:[/bold] {stats["thread_count"]}
+[bold]Checkpoints:[/bold] {stats["checkpoint_count"]}
+[bold]Database Size:[/bold] {format_bytes(stats["db_size_bytes"])}"""
 
-            if stats['oldest_thread']:
-                oldest = stats['oldest_thread']
+            if stats["oldest_thread"]:
+                oldest = stats["oldest_thread"]
                 stats_text += f"\n\n[bold]Oldest Thread:[/bold]\n  {oldest.get('name') or '(unnamed)'} ({oldest['id'][:8]})\n  Created: {relative_time(oldest.get('created', ''))}"
 
-            if stats['newest_thread']:
-                newest = stats['newest_thread']
+            if stats["newest_thread"]:
+                newest = stats["newest_thread"]
                 stats_text += f"\n\n[bold]Newest Thread:[/bold]\n  {newest.get('name') or '(unnamed)'} ({newest['id'][:8]})\n  Created: {relative_time(newest.get('created', ''))}"
 
             # Average checkpoints per thread
-            if stats['thread_count'] > 0:
-                avg_checkpoints = stats['checkpoint_count'] / stats['thread_count']
+            if stats["thread_count"] > 0:
+                avg_checkpoints = stats["checkpoint_count"] / stats["thread_count"]
                 stats_text += f"\n\n[bold]Avg Checkpoints/Thread:[/bold] {avg_checkpoints:.1f}"
 
-            panel = Panel(
-                stats_text,
-                title="Database Statistics",
-                border_style=COLORS['primary']
-            )
+            panel = Panel(stats_text, title="Database Statistics", border_style=COLORS["primary"])
 
             console.print()
             console.print(panel)
@@ -745,12 +743,16 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
     else:
         console.print()
         console.print(f"[yellow]Unknown threads subcommand: {subcommand}[/yellow]")
-        console.print("[dim]Available: continue, fork, info, rename, delete, cleanup, sync, vacuum, stats[/dim]")
+        console.print(
+            "[dim]Available: continue, fork, info, rename, delete, cleanup, sync, vacuum, stats[/dim]"
+        )
         console.print()
         return True
 
 
-def handle_command(command: str, agent, token_tracker: TokenTracker, session_state=None) -> str | bool:
+def handle_command(
+    command: str, agent, token_tracker: TokenTracker, session_state=None
+) -> str | bool:
     """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
     cmd = command.lower().strip().lstrip("/")
 
@@ -778,8 +780,7 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, session_sta
             console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
             console.print()
             console.print(
-                f"... Fresh start! Created new thread: {new_thread_id[:8]}",
-                style=COLORS["agent"]
+                f"... Fresh start! Created new thread: {new_thread_id[:8]}", style=COLORS["agent"]
             )
             console.print()
         else:
@@ -791,7 +792,7 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, session_sta
             console.print()
             console.print(
                 "[yellow]Warning: Thread manager not available. Use /new to create a fresh thread.[/yellow]",
-                style=COLORS["dim"]
+                style=COLORS["dim"],
             )
             console.print()
 

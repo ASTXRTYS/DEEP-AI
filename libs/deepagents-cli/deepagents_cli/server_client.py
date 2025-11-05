@@ -8,7 +8,9 @@ from typing import Any
 import requests
 
 
-def get_thread_data(thread_id: str, server_url: str = "http://127.0.0.1:2024") -> dict[str, Any] | None:
+def get_thread_data(
+    thread_id: str, server_url: str = "http://127.0.0.1:2024"
+) -> dict[str, Any] | None:
     """Get thread data from LangGraph server API.
 
     Args:
@@ -19,10 +21,7 @@ def get_thread_data(thread_id: str, server_url: str = "http://127.0.0.1:2024") -
         Thread data including messages, or None if server unavailable/error
     """
     try:
-        response = requests.get(
-            f"{server_url}/threads/{thread_id}/state",
-            timeout=2
-        )
+        response = requests.get(f"{server_url}/threads/{thread_id}/state", timeout=2)
         response.raise_for_status()
         return response.json()
     except Exception:
@@ -39,11 +38,7 @@ def get_all_threads(server_url: str = "http://127.0.0.1:2024") -> list[dict[str,
         List of thread data, or empty list if server unavailable
     """
     try:
-        response = requests.post(
-            f"{server_url}/threads/search",
-            json={},
-            timeout=2
-        )
+        response = requests.post(f"{server_url}/threads/search", json={}, timeout=2)
         response.raise_for_status()
         return response.json()
     except Exception:
@@ -130,19 +125,14 @@ def is_server_available(server_url: str | None = None) -> bool:
         True if server is available, False otherwise
     """
     try:
-        response = requests.get(
-            f"{server_url or get_server_url()}/ok",
-            timeout=1
-        )
+        response = requests.get(f"{server_url or get_server_url()}/ok", timeout=1)
         return response.status_code == 200
     except Exception:
         return False
 
 
 def create_thread_on_server(
-    name: str | None = None,
-    metadata: dict[str, Any] | None = None,
-    server_url: str | None = None
+    name: str | None = None, metadata: dict[str, Any] | None = None, server_url: str | None = None
 ) -> str:
     """Create a new thread on LangGraph server.
 
@@ -164,19 +154,12 @@ def create_thread_on_server(
     elif name:
         payload["metadata"] = {"name": name}
 
-    response = requests.post(
-        f"{server_url or get_server_url()}/threads",
-        json=payload,
-        timeout=2
-    )
+    response = requests.post(f"{server_url or get_server_url()}/threads", json=payload, timeout=2)
     response.raise_for_status()
     return response.json()["thread_id"]
 
 
-def fork_thread_on_server(
-    thread_id: str,
-    server_url: str | None = None
-) -> str:
+def fork_thread_on_server(thread_id: str, server_url: str | None = None) -> str:
     """Fork an existing thread on LangGraph server.
 
     Args:
@@ -191,9 +174,7 @@ def fork_thread_on_server(
         requests.Timeout: If request times out
     """
     response = requests.post(
-        f"{server_url or get_server_url()}/threads/{thread_id}/copy",
-        json={},
-        timeout=2
+        f"{server_url or get_server_url()}/threads/{thread_id}/copy", json={}, timeout=2
     )
     response.raise_for_status()
     return response.json()["thread_id"]
@@ -221,7 +202,7 @@ def start_server_if_needed() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            start_new_session=True  # Detach from parent process
+            start_new_session=True,  # Detach from parent process
         )
 
         # Wait up to 10 seconds for server to start

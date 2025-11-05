@@ -319,9 +319,7 @@ class ThreadManager:
         with self.store.edit() as editable:
             editable.threads = [t for t in editable.threads if t["id"] != thread_id]
             if editable.current_thread_id == thread_id:
-                editable.current_thread_id = (
-                    editable.threads[0]["id"] if editable.threads else None
-                )
+                editable.current_thread_id = editable.threads[0]["id"] if editable.threads else None
             new_current = editable.current_thread_id
 
         self.current_thread_id = new_current
@@ -376,9 +374,7 @@ class ThreadManager:
             if editable.current_thread_id and all(
                 t["id"] != editable.current_thread_id for t in editable.threads
             ):
-                editable.current_thread_id = (
-                    editable.threads[0]["id"] if editable.threads else None
-                )
+                editable.current_thread_id = editable.threads[0]["id"] if editable.threads else None
             new_current = editable.current_thread_id
 
         self.current_thread_id = new_current
@@ -423,9 +419,7 @@ class ThreadManager:
         oldest_thread = None
         newest_thread = None
         if data.threads:
-            sorted_by_created = sorted(
-                data.threads, key=lambda t: t.get("created") or ""
-            )
+            sorted_by_created = sorted(data.threads, key=lambda t: t.get("created") or "")
             oldest = sorted_by_created[0]
             newest = sorted_by_created[-1]
             oldest_thread = {
@@ -531,9 +525,7 @@ class ThreadManager:
             if editable.current_thread_id and all(
                 thread["id"] != editable.current_thread_id for thread in editable.threads
             ):
-                editable.current_thread_id = (
-                    editable.threads[0]["id"] if editable.threads else None
-                )
+                editable.current_thread_id = editable.threads[0]["id"] if editable.threads else None
                 current_changed = True
 
             new_current = editable.current_thread_id

@@ -43,9 +43,7 @@ class AsyncResumableShellToolMiddleware(ResumableShellToolMiddleware):
             )
         return await super().awrap_tool_call(request, handler)
 
-    async def _aget_or_create_resources(
-        self, state: AgentState
-    ) -> _SessionResources:
+    async def _aget_or_create_resources(self, state: AgentState) -> _SessionResources:
         resources = state.get("shell_session_resources")
         if isinstance(resources, _SessionResources):
             return resources

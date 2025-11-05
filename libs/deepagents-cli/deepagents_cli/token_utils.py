@@ -47,7 +47,7 @@ def calculate_baseline_tokens(model, agent_dir: Path, system_prompt: str) -> int
 
     messages = [
         SystemMessage(content=full_system_prompt),
-        HumanMessage(content="hi")  # Minimal message to satisfy API requirements
+        HumanMessage(content="hi"),  # Minimal message to satisfy API requirements
     ]
 
     try:

@@ -187,7 +187,9 @@ async def main(assistant_id: str, session_state):
         console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
         console.print()
         console.print("The DeepAgents CLI now requires the LangGraph server for thread management.")
-        console.print("This enables features like message history, thread naming, and Studio integration.")
+        console.print(
+            "This enables features like message history, thread naming, and Studio integration."
+        )
         console.print()
 
         # Try to start server automatically
@@ -203,6 +205,7 @@ async def main(assistant_id: str, session_state):
             console.print()
             console.print("Then restart the CLI.")
             import sys
+
             sys.exit(1)
 
     # Create the model (checks API keys)

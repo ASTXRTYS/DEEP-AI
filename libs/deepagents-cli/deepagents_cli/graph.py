@@ -72,9 +72,7 @@ agent_dir = Path.home() / ".deepagents" / "agent"
 agent_dir.mkdir(parents=True, exist_ok=True)
 
 long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
-backend = CompositeBackend(
-    default=FilesystemBackend(), routes={"/memories/": long_term_backend}
-)
+backend = CompositeBackend(default=FilesystemBackend(), routes={"/memories/": long_term_backend})
 
 agent_middleware = [
     AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),

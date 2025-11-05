@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - fallback for environments without file
                 os.close(self._fd)
                 self._fd = None
 
+
 if TYPE_CHECKING:
     from .thread_manager import ThreadMetadata
 
@@ -160,9 +161,7 @@ class ThreadStore:
 
         threads_raw = raw.get("threads", [])
         if not isinstance(threads_raw, list):
-            raise ThreadStoreCorruptError(
-                f"Thread metadata is malformed: {self.threads_file}"
-            )
+            raise ThreadStoreCorruptError(f"Thread metadata is malformed: {self.threads_file}")
 
         threads = [
             cast("ThreadMetadata", dict(thread))

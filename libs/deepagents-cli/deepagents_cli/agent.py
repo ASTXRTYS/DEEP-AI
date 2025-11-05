@@ -165,6 +165,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
 
     # Set up persistent checkpointing for short-term memory (conversations)
     import sqlite3
+
     checkpoint_db = agent_dir / "checkpoints.db"
     # Direct construction - proper way for long-running applications
     conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
@@ -178,6 +179,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
 
     # Set up PostgreSQL store for cross-conversation long-term memory
     import psycopg
+
     database_url = os.environ.get("DEEPAGENTS_DATABASE_URL", "postgresql://localhost/deepagents")
     # Direct construction for long-running applications
     pg_conn = psycopg.connect(database_url, autocommit=True)

@@ -169,9 +169,7 @@ class AgentMemoryMiddleware(AgentMiddleware):
                     self.backend.read, AGENT_MEMORY_FILE_PATH
                 )
             else:
-                file_data = await asyncio.to_thread(
-                    self.backend.read, AGENT_MEMORY_FILE_PATH
-                )
+                file_data = await asyncio.to_thread(self.backend.read, AGENT_MEMORY_FILE_PATH)
             return {"agent_memory": file_data}
 
     def wrap_model_call(

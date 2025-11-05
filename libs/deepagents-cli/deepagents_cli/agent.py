@@ -47,7 +47,7 @@ def list_agents() -> None:
     console.print()
 
 
-def reset_agent(agent_name: str, source_agent: str = None) -> None:
+def reset_agent(agent_name: str, source_agent: str | None = None) -> None:
     """Reset an agent to default or copy from another agent."""
     agents_dir = Path.home() / ".deepagents"
     agent_dir = agents_dir / agent_name
@@ -289,7 +289,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
-    agent = create_deep_agent(
+    return create_deep_agent(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
@@ -305,5 +305,3 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
             "task": task_interrupt_config,
         },
     ).with_config(config)
-
-    return agent

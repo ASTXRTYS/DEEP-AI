@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware.shell_tool import (
     _PersistentShellTool,
     _SessionResources,
 )
-from langchain.agents.middleware.types import AgentState
-from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import ToolMessage
-from langgraph.types import Command
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from langchain.agents.middleware.types import AgentState
+    from langchain.tools.tool_node import ToolCallRequest
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
 
 
 class AsyncResumableShellToolMiddleware(ResumableShellToolMiddleware):

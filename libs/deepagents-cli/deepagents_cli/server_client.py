@@ -63,7 +63,7 @@ def extract_first_user_message(thread_data: dict[str, Any]) -> str | None:
                 text = content[0].get("text", "")
                 # Truncate to first 50 chars for use as name
                 return text[:50] if text else None
-            elif isinstance(content, str):
+            if isinstance(content, str):
                 return content[:50] if content else None
 
     return None

@@ -57,9 +57,8 @@ def calculate_baseline_tokens(model, agent_dir: Path, system_prompt: str) -> int
 
         # Subtract the dummy message tokens (~1-2 tokens) to get just the system prompt count
         dummy_message_tokens = model.get_num_tokens_from_messages([HumanMessage(content="hi")])
-        baseline_tokens = token_count - dummy_message_tokens
+        return token_count - dummy_message_tokens
 
-        return baseline_tokens
     except Exception as e:
         # Fallback if token counting fails
         console.print(f"[yellow]Warning: Could not calculate baseline tokens: {e}[/yellow]")

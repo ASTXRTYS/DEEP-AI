@@ -15,7 +15,7 @@ from .tools import http_request, tavily_client, web_search
 from .ui import TokenTracker, show_help
 
 
-def check_cli_dependencies():
+def check_cli_dependencies() -> None:
     """Check if CLI optional dependencies are installed."""
     missing = []
 
@@ -45,14 +45,8 @@ def check_cli_dependencies():
         missing.append("prompt-toolkit")
 
     if missing:
-        print("\n❌ Missing required CLI dependencies!")
-        print("\nThe following packages are required to use the deepagents CLI:")
-        for pkg in missing:
-            print(f"  - {pkg}")
-        print("\nPlease install them with:")
-        print("  pip install deepagents[cli]")
-        print("\nOr install all dependencies:")
-        print("  pip install 'deepagents[cli]'")
+        for _pkg in missing:
+            pass
         sys.exit(1)
 
 
@@ -94,7 +88,9 @@ def parse_args():
     return parser.parse_args()
 
 
-async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0):
+async def simple_cli(
+    agent, assistant_id: str | None, session_state, baseline_tokens: int = 0
+) -> None:
     """Main CLI loop."""
     from .server_client import is_server_available
 
@@ -178,7 +174,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
         await execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
 
-async def main(assistant_id: str, session_state):
+async def main(assistant_id: str, session_state) -> None:
     """Main entry point."""
     from .server_client import is_server_available, start_server_if_needed
 
@@ -236,7 +232,7 @@ async def main(assistant_id: str, session_state):
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
 
-def cli_main():
+def cli_main() -> None:
     """Entry point for console script."""
     # Check dependencies first
     check_cli_dependencies()

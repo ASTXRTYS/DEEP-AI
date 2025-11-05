@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import builtins
+from datetime import UTC, datetime
 
 from deepagents_cli import commands
 
 
 def _sample_thread(idx: int) -> dict:
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
         "id": f"thread-{idx:02d}-abcdef0123456789",
         "assistant_id": "unit-test",

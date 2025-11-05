@@ -40,7 +40,7 @@ def _get_default_tools():
     return tools
 
 
-def _get_system_prompt():
+def _get_system_prompt() -> str:
     """Get system prompt for server deployment."""
     # Simplified version - for full prompts, use CLI
     return """You are a helpful coding assistant with access to file operations, shell commands, and web search.

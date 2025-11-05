@@ -61,7 +61,7 @@ console = Console(highlight=False)
 class SessionState:
     """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False, thread_manager=None):
+    def __init__(self, auto_approve: bool = False, thread_manager=None) -> None:
         self.auto_approve = auto_approve
         self.thread_manager = thread_manager
 

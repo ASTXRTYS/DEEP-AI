@@ -8,9 +8,8 @@ LangGraph checkpointer (SQLite by default).
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
@@ -22,7 +21,7 @@ if TYPE_CHECKING:
 
 def _now_iso() -> str:
     """Return a UTC timestamp suitable for thread metadata."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class ThreadMetadata(TypedDict):
@@ -57,7 +56,7 @@ class ThreadSyncReport:
 class ThreadManager:
     """Manages conversation threads for a DeepAgents CLI agent."""
 
-    def __init__(self, agent_dir: Path, assistant_id: str):
+    def __init__(self, agent_dir: Path, assistant_id: str) -> None:
         self.agent_dir = Path(agent_dir)
         self.assistant_id = assistant_id
         self.threads_file = self.agent_dir / "threads.json"
@@ -125,7 +124,8 @@ class ThreadManager:
     def _select_most_recent_thread(threads: list[ThreadMetadata]) -> str:
         """Pick the thread most recently used, falling back to creation time."""
         if not threads:
-            raise ValueError("No threads available to select from.")
+            msg = "No threads available to select from."
+            raise ValueError(msg)
 
         def sort_key(thread: ThreadMetadata) -> tuple[str, str]:
             return (
@@ -140,16 +140,16 @@ class ThreadManager:
         """Return True if the timestamp is within the grace window."""
         if not value:
             return False
-        trimmed = value[:-1] if value.endswith("Z") else value
+        trimmed = value.removesuffix("Z")
         try:
             timestamp = datetime.fromisoformat(trimmed)
         except ValueError:
             return False
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.replace(tzinfo=UTC)
         else:
-            timestamp = timestamp.astimezone(timezone.utc)
-        return timestamp >= datetime.now(timezone.utc) - timedelta(minutes=minutes)
+            timestamp = timestamp.astimezone(UTC)
+        return timestamp >= datetime.now(UTC) - timedelta(minutes=minutes)
 
     def _should_remove_metadata(
         self,
@@ -199,9 +199,8 @@ class ThreadManager:
             thread = next((thread for thread in data.threads if thread["id"] == thread_id), None)
             if not thread:
                 available = [t["id"] for t in data.threads]
-                raise ValueError(
-                    f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
-                )
+                msg = f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
+                raise ValueError(msg)
 
             thread["last_used"] = now
             data.current_thread_id = thread_id
@@ -222,12 +221,13 @@ class ThreadManager:
         if self.current_thread_id is None:
             self._load_or_initialize()
         if self.current_thread_id is None:
-            raise RuntimeError("Thread manager has no current thread.")
+            msg = "Thread manager has no current thread."
+            raise RuntimeError(msg)
         return self.current_thread_id
 
     def fork_thread(
         self,
-        agent: "CompiledGraph",
+        agent: CompiledGraph,
         source_thread_id: str | None = None,
         name: str | None = None,
     ) -> str:
@@ -241,9 +241,8 @@ class ThreadManager:
         source_thread = next((t for t in source_data.threads if t["id"] == source_thread_id), None)
         if not source_thread:
             available = [t["id"] for t in source_data.threads]
-            raise ValueError(
-                f"Source thread '{source_thread_id}' not found. Available: {', '.join(available)}"
-            )
+            msg = f"Source thread '{source_thread_id}' not found. Available: {', '.join(available)}"
+            raise ValueError(msg)
 
         # Fork thread on server
         new_thread_id = fork_thread_on_server(source_thread_id)
@@ -271,7 +270,8 @@ class ThreadManager:
         with self.store.edit() as data:
             parent = next((t for t in data.threads if t["id"] == source_thread_id), None)
             if parent is None:
-                raise ValueError(f"Source thread '{source_thread_id}' not found.")
+                msg = f"Source thread '{source_thread_id}' not found."
+                raise ValueError(msg)
 
             parent["last_used"] = now
             data.threads.append(new_thread)
@@ -290,25 +290,26 @@ class ThreadManager:
         with self.store.edit() as data:
             thread = next((t for t in data.threads if t["id"] == thread_id), None)
             if not thread:
-                raise ValueError(f"Thread '{thread_id}' not found.")
+                msg = f"Thread '{thread_id}' not found."
+                raise ValueError(msg)
             thread["name"] = new_name
 
-    def delete_thread(self, thread_id: str, agent: "CompiledGraph") -> None:
+    def delete_thread(self, thread_id: str, agent: CompiledGraph) -> None:
         """Delete a thread and its checkpoints."""
         current_id = self.get_current_thread_id()
         if thread_id == current_id:
-            raise ValueError(
+            msg = (
                 "Cannot delete the current thread. Switch to another thread first with "
                 "'/threads continue <id>' or create a new thread with '/new'."
             )
+            raise ValueError(msg)
 
         data = self._safe_load()
         target = next((t for t in data.threads if t["id"] == thread_id), None)
         if not target:
             available = [t["id"] for t in data.threads]
-            raise ValueError(
-                f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
-            )
+            msg = f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
+            raise ValueError(msg)
 
         try:
             agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
@@ -328,21 +329,20 @@ class ThreadManager:
     # Maintenance operations
     # ------------------------------------------------------------------
     def cleanup_old_threads(
-        self, days_old: int, agent: "CompiledGraph", dry_run: bool = False
+        self, days_old: int, agent: CompiledGraph, dry_run: bool = False
     ) -> tuple[int, list[str]]:
         """Delete threads whose last activity predates the cutoff."""
         data = self._safe_load()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days_old)
+        cutoff = datetime.now(UTC) - timedelta(days=days_old)
         stale_threads: list[ThreadMetadata] = []
 
         for thread in data.threads:
             if thread["id"] == self.get_current_thread_id():
                 continue
             last_used_str = thread.get("last_used", "")
-            if last_used_str.endswith("Z"):
-                last_used_str = last_used_str[:-1]
+            last_used_str = last_used_str.removesuffix("Z")
             try:
-                last_used = datetime.fromisoformat(last_used_str).replace(tzinfo=timezone.utc)
+                last_used = datetime.fromisoformat(last_used_str).replace(tzinfo=UTC)
             except (ValueError, AttributeError):
                 continue
             if last_used < cutoff:
@@ -490,11 +490,11 @@ class ThreadManager:
         with self.store.edit() as editable:
             live_ids = {thread["id"] for thread in editable.threads}
             stale_threads = [
-                cast(ThreadMetadata, thread)
+                cast("ThreadMetadata", thread)
                 for thread in editable.threads
                 if thread["id"] not in checkpoint_ids
                 and self._should_remove_metadata(
-                    cast(ThreadMetadata, thread),
+                    cast("ThreadMetadata", thread),
                     current_thread_id=editable.current_thread_id,
                 )
             ]

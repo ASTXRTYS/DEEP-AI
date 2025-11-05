@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast
 
 try:  # pragma: no cover - optional dependency for portability
     from filelock import FileLock, Timeout
@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - fallback for environments without file
     class FileLock:
         """Minimal advisory lock fallback using fcntl (POSIX only)."""
 
-        def __init__(self, path: str):
+        def __init__(self, path: str) -> None:
             self.path = path
             self._fd: int | None = None
 
@@ -40,7 +40,8 @@ except ImportError:  # pragma: no cover - fallback for environments without file
                     if exc.errno != errno.EWOULDBLOCK:
                         raise
                     if deadline is not None and time.monotonic() > deadline:
-                        raise Timeout(f"Timed out acquiring lock {self.path}") from None
+                        msg = f"Timed out acquiring lock {self.path}"
+                        raise Timeout(msg) from None
                     time.sleep(0.1)
 
         def release(self) -> None:
@@ -51,6 +52,8 @@ except ImportError:  # pragma: no cover - fallback for environments without file
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .thread_manager import ThreadMetadata
 
 
@@ -70,11 +73,11 @@ class ThreadStoreLockTimeout(ThreadStoreError):
 class ThreadStoreData:
     """In-memory representation of thread metadata."""
 
-    threads: list["ThreadMetadata"]
+    threads: list[ThreadMetadata]
     current_thread_id: str | None
     version: int
 
-    def clone(self) -> "ThreadStoreData":
+    def clone(self) -> ThreadStoreData:
         """Create a deep copy of the current data structure."""
         thread_copies = [cast("ThreadMetadata", dict(thread)) for thread in self.threads]
         return ThreadStoreData(
@@ -89,7 +92,7 @@ class ThreadStore:
 
     VERSION = 1
 
-    def __init__(self, threads_file: Path, *, timeout: float = 5.0):
+    def __init__(self, threads_file: Path, *, timeout: float = 5.0) -> None:
         self.threads_file = Path(threads_file)
         self.threads_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -138,9 +141,8 @@ class ThreadStore:
         try:
             self._lock.acquire(timeout=self._timeout)
         except Timeout as exc:  # pragma: no cover - rare contention case
-            raise ThreadStoreLockTimeout(
-                f"Timed out waiting for thread metadata lock: {self.threads_file}"
-            ) from exc
+            msg = f"Timed out waiting for thread metadata lock: {self.threads_file}"
+            raise ThreadStoreLockTimeout(msg) from exc
 
     def _load_unlocked(self) -> ThreadStoreData:
         if not self.threads_file.exists():
@@ -150,18 +152,20 @@ class ThreadStore:
             with self.threads_file.open("r", encoding="utf-8") as handle:
                 raw = json.load(handle)
         except json.JSONDecodeError as exc:
-            raise ThreadStoreCorruptError(f"Corrupt thread metadata: {self.threads_file}") from exc
+            msg = f"Corrupt thread metadata: {self.threads_file}"
+            raise ThreadStoreCorruptError(msg) from exc
         except OSError as exc:
-            raise ThreadStoreError(f"Unable to read thread metadata: {self.threads_file}") from exc
+            msg = f"Unable to read thread metadata: {self.threads_file}"
+            raise ThreadStoreError(msg) from exc
 
         if not isinstance(raw, dict):
-            raise ThreadStoreCorruptError(
-                f"Unexpected data format in thread metadata: {self.threads_file}"
-            )
+            msg = f"Unexpected data format in thread metadata: {self.threads_file}"
+            raise ThreadStoreCorruptError(msg)
 
         threads_raw = raw.get("threads", [])
         if not isinstance(threads_raw, list):
-            raise ThreadStoreCorruptError(f"Thread metadata is malformed: {self.threads_file}")
+            msg = f"Thread metadata is malformed: {self.threads_file}"
+            raise ThreadStoreCorruptError(msg)
 
         threads = [
             cast("ThreadMetadata", dict(thread))
@@ -201,7 +205,5 @@ class ThreadStore:
             os.replace(tmp_path, self.threads_file)
         finally:
             if os.path.exists(tmp_path):
-                try:
+                with suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass

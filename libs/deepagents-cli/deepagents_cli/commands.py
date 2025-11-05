@@ -1,8 +1,8 @@
 """Command handlers for slash commands and bash execution."""
 
 import subprocess
-import sys
-from datetime import datetime, timezone
+import sys  # noqa: F401 - needed for test mocking
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rich.panel import Panel
@@ -16,8 +16,8 @@ except ImportError:  # pragma: no cover - exercised indirectly via fallback path
     tty = None
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
+from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
-from .server_client import get_thread_data, extract_first_user_message, extract_last_message_preview
 
 
 def relative_time(iso_timestamp: str) -> str:
@@ -33,27 +33,23 @@ def relative_time(iso_timestamp: str) -> str:
         # Parse ISO timestamp (with or without 'Z')
         ts_str = iso_timestamp.rstrip("Z")
         ts = datetime.fromisoformat(ts_str)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        else:
-            ts = ts.astimezone(timezone.utc)
+        ts = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta = now - ts
 
         seconds = delta.total_seconds()
 
         if seconds < 60:
             return "just now"
-        elif seconds < 3600:
+        if seconds < 3600:
             mins = int(seconds / 60)
             return f"{mins}m ago"
-        elif seconds < 86400:
+        if seconds < 86400:
             hours = int(seconds / 3600)
             return f"{hours}h ago"
-        else:
-            days = int(seconds / 86400)
-            return f"{days}d ago"
+        days = int(seconds / 86400)
+        return f"{days}d ago"
     except Exception:
         return iso_timestamp
 
@@ -75,14 +71,16 @@ def find_thread_by_partial_id(thread_manager, partial_id: str):
     matches = [t for t in threads if t["id"].startswith(partial_id)]
 
     if not matches:
-        raise ValueError(f"No thread found matching '{partial_id}'")
+        msg = f"No thread found matching '{partial_id}'"
+        raise ValueError(msg)
 
     if len(matches) > 1:
         match_ids = [t["id"][:8] for t in matches]
-        raise ValueError(
+        msg = (
             f"Ambiguous thread ID '{partial_id}' - matches multiple threads: {', '.join(match_ids)}\n"
             f"Please provide more characters to uniquely identify the thread."
         )
+        raise ValueError(msg)
 
     return matches[0], matches
 
@@ -122,7 +120,6 @@ def _enrich_thread_with_server_data(thread: dict) -> dict:
 
 def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     """Build a single-line summary describing a thread for the picker."""
-
     display_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
     last_used = relative_time(thread.get("last_used", ""))
@@ -137,8 +134,7 @@ def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     # Build summary with optional preview
     if preview:
         return f"{short_id}  {display_name}  · {token_text}  · {preview}  · {last_used}{current_suffix}"
-    else:
-        return f"{short_id}  {display_name}  · {token_text}  · Last: {last_used}{current_suffix}"
+    return f"{short_id}  {display_name}  · {token_text}  · Last: {last_used}{current_suffix}"
 
 
 def _select_thread_interactively(threads, current_thread_id: str | None) -> str | None:
@@ -155,7 +151,6 @@ def _select_thread_interactively(threads, current_thread_id: str | None) -> str 
 
 def _select_thread_fallback(threads, current_thread_id: str | None) -> str | None:
     """Fallback selection that works without raw TTY capabilities."""
-
     console.print()
     console.print("Select a thread:")
 
@@ -363,7 +358,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads fork [name]
-    elif subcommand == "fork":
+    if subcommand == "fork":
         name = subargs if subargs else None
 
         try:
@@ -380,7 +375,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             console.print(
                 f"[{COLORS['primary']}]✓ Forked thread: {current_name} → {fork_name} ({new_id[:8]})[/{COLORS['primary']}]"
             )
-            console.print(f"[dim]Now on new thread. Use /threads to see all threads.[/dim]")
+            console.print("[dim]Now on new thread. Use /threads to see all threads.[/dim]")
             console.print()
         except Exception as e:
             console.print()
@@ -390,7 +385,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads info [id]
-    elif subcommand == "info":
+    if subcommand == "info":
         target_id = subargs if subargs else thread_manager.get_current_thread_id()
 
         try:
@@ -429,7 +424,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads rename <id> <name>
-    elif subcommand == "rename":
+    if subcommand == "rename":
         if not subargs:
             console.print()
             console.print("[yellow]Usage: /threads rename <id> <name>[/yellow]")
@@ -465,7 +460,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads delete <id>
-    elif subcommand == "delete":
+    if subcommand == "delete":
         if not subargs:
             console.print()
             console.print("[yellow]Usage: /threads delete <id>[/yellow]")
@@ -508,7 +503,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads cleanup [--days N]
-    elif subcommand == "cleanup":
+    if subcommand == "cleanup":
         # Parse --days flag or use default
         days_old = 30
         if subargs.startswith("--days"):
@@ -566,7 +561,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         try:
             count, names = thread_manager.cleanup_old_threads(days_old, agent, dry_run=False)
             console.print(f"[{COLORS['primary']}]✓ Deleted {count} thread(s)[/{COLORS['primary']}]")
-            console.print(f"[dim]Tip: Run /threads vacuum to reclaim disk space[/dim]")
+            console.print("[dim]Tip: Run /threads vacuum to reclaim disk space[/dim]")
             console.print()
         except Exception as e:
             console.print()
@@ -576,7 +571,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads sync
-    elif subcommand == "sync":
+    if subcommand == "sync":
         console.print()
         console.print("[dim]Checking for metadata/checkpoint inconsistencies...[/dim]")
 
@@ -658,7 +653,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads vacuum
-    elif subcommand == "vacuum":
+    if subcommand == "vacuum":
         console.print()
         console.print("[dim]Vacuuming database to reclaim disk space...[/dim]")
 
@@ -669,13 +664,12 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             reclaimed = size_before - size_after
 
             # Format sizes
-            def format_bytes(b):
+            def format_bytes(b) -> str:
                 if b < 1024:
                     return f"{b}B"
-                elif b < 1024 * 1024:
+                if b < 1024 * 1024:
                     return f"{b / 1024:.1f}KB"
-                else:
-                    return f"{b / (1024 * 1024):.1f}MB"
+                return f"{b / (1024 * 1024):.1f}MB"
 
             console.print()
             console.print(f"[{COLORS['primary']}]✓ Vacuum complete[/{COLORS['primary']}]")
@@ -694,7 +688,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         return True
 
     # /threads stats
-    elif subcommand == "stats":
+    if subcommand == "stats":
         console.print()
         console.print("[dim]Gathering database statistics...[/dim]")
 
@@ -702,13 +696,12 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             stats = thread_manager.get_database_stats()
 
             # Format size
-            def format_bytes(b):
+            def format_bytes(b) -> str:
                 if b < 1024:
                     return f"{b}B"
-                elif b < 1024 * 1024:
+                if b < 1024 * 1024:
                     return f"{b / 1024:.1f}KB"
-                else:
-                    return f"{b / (1024 * 1024):.1f}MB"
+                return f"{b / (1024 * 1024):.1f}MB"
 
             # Build stats panel
             stats_text = f"""[bold]Threads:[/bold] {stats["thread_count"]}
@@ -740,21 +733,20 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         return True
 
-    else:
-        console.print()
-        console.print(f"[yellow]Unknown threads subcommand: {subcommand}[/yellow]")
-        console.print(
-            "[dim]Available: continue, fork, info, rename, delete, cleanup, sync, vacuum, stats[/dim]"
-        )
-        console.print()
-        return True
+    console.print()
+    console.print(f"[yellow]Unknown threads subcommand: {subcommand}[/yellow]")
+    console.print(
+        "[dim]Available: continue, fork, info, rename, delete, cleanup, sync, vacuum, stats[/dim]"
+    )
+    console.print()
+    return True
 
 
 def handle_command(
     command: str, agent, token_tracker: TokenTracker, session_state=None
 ) -> str | bool:
     """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
-    cmd = command.lower().strip().lstrip("/")
+    command.lower().strip().lstrip("/")
 
     # Extract command and args
     parts = command.strip().lstrip("/").split(maxsplit=1)

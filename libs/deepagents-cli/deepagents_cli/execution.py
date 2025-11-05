@@ -593,3 +593,10 @@ def execute_task(
         # Track token usage (display only via /tokens command)
         if token_tracker and (captured_input_tokens or captured_output_tokens):
             token_tracker.add(captured_input_tokens, captured_output_tokens)
+
+    # Touch the thread so cleanup/TTL logic sees recent activity
+    if session_state and session_state.thread_manager and thread_id:
+        try:
+            session_state.thread_manager.touch_thread(thread_id, reason="interaction")
+        except Exception:  # pragma: no cover - defensive
+            pass

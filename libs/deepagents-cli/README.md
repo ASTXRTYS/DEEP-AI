@@ -105,6 +105,7 @@ deepagents help
 - `/threads rename <id> <name>` - Rename thread
 - `/threads delete <id>` - Delete thread (with confirmation)
 - `/threads cleanup [--days N]` - Delete threads older than N days (default: 30)
+- `/threads sync` - Reconcile metadata with checkpoints (recover or prune threads)
 - `/threads vacuum` - Reclaim disk space from deleted threads
 - `/threads stats` - Show database statistics
 
@@ -142,6 +143,9 @@ Stored in: `~/.deepagents/{agent_name}/`
 
 # Reclaim disk space after deletions
 /threads vacuum
+
+# Repair metadata if automatic TTL deleted checkpoints
+/threads sync
 ```
 
 **Best Practices**:

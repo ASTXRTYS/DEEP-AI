@@ -305,7 +305,7 @@ stats = thread_manager.get_database_stats()
 - **Server users**: TTL runs automatically, but run `/threads cleanup` to clean pre-TTL threads
 - Run `/threads vacuum` after bulk deletions to reclaim disk space
 - Monitor database size with `/threads stats`
-- Clean orphaned metadata: After TTL deletes checkpoints, run `/threads cleanup` to sync `threads.json`
+- Repair orphaned metadata after TTL by running `/threads sync`
 - Consider longer TTL for important conversations (14-90 days)
 - Document TTL policy for users (data retention period)
 
@@ -469,6 +469,7 @@ config = {"configurable": {"thread_id": thread_id}}
 - `/threads fork [name]` - Fork current thread
 - `/threads info [id]` - Show thread details
 - `/threads rename <id> <name>` - Rename thread
+- `/threads sync` - Reconcile metadata with checkpoints
 
 ---
 

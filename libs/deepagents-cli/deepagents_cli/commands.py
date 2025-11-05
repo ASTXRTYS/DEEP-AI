@@ -378,6 +378,86 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
 
         return True
 
+    # /threads sync
+    elif subcommand == "sync":
+        console.print()
+        console.print("[dim]Checking for metadata/checkpoint inconsistencies...[/dim]")
+
+        try:
+            preview = thread_manager.reconcile_with_checkpointer(apply=False)
+        except Exception as e:  # pragma: no cover - defensive
+            console.print()
+            console.print(f"[red]Error during reconciliation: {e}[/red]")
+            console.print()
+            return True
+
+        if not preview.pending_changes:
+            console.print()
+            console.print(f"[{COLORS['primary']}]✓ Threads are already in sync.[/{COLORS['primary']}]")
+            console.print()
+            return True
+
+        console.print()
+        if preview.metadata_only:
+            console.print("[yellow]Metadata with no matching checkpoints:[/yellow]")
+            for thread in preview.metadata_only[:10]:
+                name = thread.get('name') or '(unnamed)'
+                console.print(f"  • {name} ({thread['id'][:8]})")
+            if len(preview.metadata_only) > 10:
+                console.print(f"  ... and {len(preview.metadata_only) - 10} more")
+            console.print()
+
+        if preview.checkpoint_only:
+            console.print("[yellow]Checkpoints missing from metadata:[/yellow]")
+            for thread_id in preview.checkpoint_only[:10]:
+                console.print(f"  • {thread_id[:8]}")
+            if len(preview.checkpoint_only) > 10:
+                console.print(f"  ... and {len(preview.checkpoint_only) - 10} more")
+            console.print()
+
+        console.print(
+            "[dim]Recent or active threads without checkpoints are preserved automatically.[/dim]"
+        )
+        console.print()
+
+        response = console.input("[yellow]Apply fixes? (yes/no): [/yellow]")
+        console.print()
+
+        if response.lower() not in ['yes', 'y']:
+            console.print("[dim]Sync cancelled.[/dim]")
+            console.print()
+            return True
+
+        try:
+            result = thread_manager.reconcile_with_checkpointer(apply=True)
+        except Exception as e:  # pragma: no cover - defensive
+            console.print(f"[red]Error applying reconciliation: {e}[/red]")
+            console.print()
+            return True
+
+        console.print(f"[{COLORS['primary']}]✓ Threads synchronized.[/{COLORS['primary']}]")
+
+        if result.removed:
+            console.print("  Removed metadata entries:")
+            for thread in result.removed:
+                name = thread.get('name') or '(unnamed)'
+                console.print(f"    • {name} ({thread['id'][:8]})")
+
+        if result.added:
+            console.print("  Recovered threads from checkpoints:")
+            for thread in result.added:
+                name = thread.get('name') or '(unnamed)'
+                console.print(f"    • {name} ({thread['id'][:8]})")
+
+        if result.current_thread_changed and result.new_current_thread_id:
+            console.print(
+                f"  New current thread: {result.new_current_thread_id[:8]}",
+                style=COLORS["dim"],
+            )
+
+        console.print()
+        return True
+
     # /threads vacuum
     elif subcommand == "vacuum":
         console.print()
@@ -470,7 +550,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
     else:
         console.print()
         console.print(f"[yellow]Unknown threads subcommand: {subcommand}[/yellow]")
-        console.print("[dim]Available: continue, fork, info, rename, delete, cleanup, vacuum, stats[/dim]")
+        console.print("[dim]Available: continue, fork, info, rename, delete, cleanup, sync, vacuum, stats[/dim]")
         console.print()
         return True
 

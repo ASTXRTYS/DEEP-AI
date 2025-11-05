@@ -51,6 +51,7 @@ COMMANDS = {
     "threads rename <id> <name>": "Rename a thread",
     "threads delete <id>": "Delete a thread (requires confirmation)",
     "threads cleanup [--days N]": "Delete threads older than N days (default: 30)",
+    "threads sync": "Reconcile metadata with stored checkpoints",
     "threads vacuum": "Reclaim disk space from deleted threads",
     "threads stats": "Show database statistics (threads, checkpoints, size)",
 }

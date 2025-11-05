@@ -1,288 +1,219 @@
 """Thread management for DeepAgents CLI.
 
-This module provides ThreadManager for creating, switching, and managing
-conversation threads. Each thread maintains its own conversation history
-in the LangGraph checkpointer while sharing access to /memories/ files.
-
-Thread ID Format: Pure UUID (LangGraph standard)
-Example: 550e8400-e29b-41d4-a716-446655440000
-
-Metadata Storage: ~/.deepagents/{agent}/threads.json
-
-Note: We follow LangGraph's convention of using pure UUIDs for thread IDs.
-This ensures compatibility with RemoteGraph and future LangGraph features.
-The assistant_id is stored in metadata, not embedded in the thread ID.
+This module owns the lifecycle for conversation threads. Metadata lives in
+`~/.deepagents/{agent}/threads.json`, persisted through :class:`ThreadStore`
+for atomic, cross-process-safe updates. Conversation state remains in the
+LangGraph checkpointer (SQLite by default).
 """
 
-import json
+from __future__ import annotations
+
 import uuid
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
+
+from .thread_store import ThreadStore, ThreadStoreCorruptError, ThreadStoreData
 
 if TYPE_CHECKING:
     from langgraph.graph.graph import CompiledGraph
+
+
+def _now_iso() -> str:
+    """Return a UTC timestamp suitable for thread metadata."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class ThreadMetadata(TypedDict):
     """Metadata for a conversation thread."""
 
     id: str
-    """Thread ID (pure UUID following LangGraph standard)"""
-
     assistant_id: str
-    """Agent/assistant this thread belongs to"""
-
     created: str
-    """ISO 8601 timestamp when thread was created"""
-
     last_used: str
-    """ISO 8601 timestamp when thread was last accessed"""
-
     parent_id: str | None
-    """Parent thread ID if this was forked, None otherwise"""
-
     name: str | None
-    """Optional human-readable name for the thread"""
+
+
+@dataclass
+class ThreadSyncReport:
+    """Summary of a metadata/checkpointer reconciliation run."""
+
+    metadata_only: list[ThreadMetadata]
+    checkpoint_only: list[str]
+    removed: list[ThreadMetadata]
+    added: list[ThreadMetadata]
+    current_thread_changed: bool
+    new_current_thread_id: str | None
+
+    @property
+    def pending_changes(self) -> bool:
+        """True if metadata and checkpoint states disagree."""
+        return bool(self.metadata_only or self.checkpoint_only)
 
 
 class ThreadManager:
-    """Manages conversation threads for a DeepAgents CLI agent.
-
-    Each agent (identified by assistant_id) has its own set of threads stored
-    in ~/.deepagents/{assistant_id}/threads.json. The manager handles:
-    - Creating new threads with unique UUIDs (LangGraph standard)
-    - Switching between existing threads
-    - Listing all available threads
-    - Forking threads to branch conversations (with checkpoint state copying)
-
-    Thread IDs are pure UUIDs following LangGraph's conventions for maximum
-    compatibility (e.g., with RemoteGraph). The assistant_id is stored in
-    metadata, not embedded in the thread ID.
-
-    Example thread ID: 550e8400-e29b-41d4-a716-446655440000
-
-    The current thread ID is tracked in-memory and determines which conversation
-    history the LangGraph checkpointer loads.
-
-    Args:
-        agent_dir: Path to the agent's directory (e.g., ~/.deepagents/agent)
-        assistant_id: Agent identifier (e.g., "agent")
-
-    Example:
-        ```python
-        from pathlib import Path
-        agent_dir = Path.home() / ".deepagents" / "agent"
-        manager = ThreadManager(agent_dir, "agent")
-
-        # Create new thread
-        thread_id = manager.create_thread()
-        # Returns: "550e8400-e29b-41d4-a716-446655440000"
-
-        # List threads
-        threads = manager.list_threads()
-
-        # Switch thread
-        manager.switch_thread("550e8400-e29b-41d4-a716-446655440000")
-
-        # Get current thread
-        current = manager.current_thread_id
-
-        # Fork thread (requires agent for checkpoint copying)
-        new_id = manager.fork_thread(current, agent)
-        ```
-    """
+    """Manages conversation threads for a DeepAgents CLI agent."""
 
     def __init__(self, agent_dir: Path, assistant_id: str):
-        """Initialize ThreadManager.
-
-        Args:
-            agent_dir: Path to agent directory (e.g., ~/.deepagents/agent)
-            assistant_id: Agent identifier (e.g., "agent")
-        """
         self.agent_dir = Path(agent_dir)
         self.assistant_id = assistant_id
         self.threads_file = self.agent_dir / "threads.json"
-        self.current_thread_id: str | None = None
-
-        # Ensure agent directory exists
         self.agent_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load or initialize threads metadata
+        self.store = ThreadStore(self.threads_file)
+        self.current_thread_id: str | None = None
+
         self._load_or_initialize()
 
-    def _load_or_initialize(self) -> None:
-        """Load threads metadata from file or initialize with default thread."""
-        if self.threads_file.exists():
-            # Load existing threads
-            try:
-                with open(self.threads_file) as f:
-                    data = json.load(f)
-                    threads = data.get("threads", [])
-                    current_id = data.get("current_thread_id")
-
-                    # Set current thread (use last thread if current_id not found)
-                    if current_id and any(t["id"] == current_id for t in threads):
-                        self.current_thread_id = current_id
-                    elif threads:
-                        # Use most recently used thread
-                        threads_sorted = sorted(
-                            threads, key=lambda t: t.get("last_used", ""), reverse=True
-                        )
-                        self.current_thread_id = threads_sorted[0]["id"]
-            except (json.JSONDecodeError, KeyError, ValueError):
-                # Corrupted file, reinitialize
-                self._initialize_default_thread()
-        else:
-            # No threads file, create default thread
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _safe_load(self) -> ThreadStoreData:
+        """Load metadata, repairing corrupt files if necessary."""
+        try:
+            return self.store.load()
+        except ThreadStoreCorruptError:
+            self.store.archive_corrupt_file()
             self._initialize_default_thread()
+            return self.store.load()
 
     def _initialize_default_thread(self) -> None:
-        """Initialize with a default thread using a pure UUID."""
+        """Create a default thread when none exist."""
         default_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _now_iso()
+        default_thread: ThreadMetadata = {
+            "id": default_id,
+            "assistant_id": self.assistant_id,
+            "created": now,
+            "last_used": now,
+            "parent_id": None,
+            "name": "Default conversation",
+        }
 
-        threads = [
-            ThreadMetadata(
-                id=default_id,
-                assistant_id=self.assistant_id,
-                created=now,
-                last_used=now,
-                parent_id=None,
-                name="Default conversation",
-            )
-        ]
+        with self.store.edit() as data:
+            data.threads = [default_thread]
+            data.current_thread_id = default_id
+            data.version = ThreadStore.VERSION
 
         self.current_thread_id = default_id
-        self._save_threads(threads)
 
-    def _save_threads(self, threads: list[ThreadMetadata]) -> None:
-        """Save threads metadata to file.
+    def _load_or_initialize(self) -> None:
+        """Ensure metadata exists and the current thread is set."""
+        data = self._safe_load()
 
-        Args:
-            threads: List of thread metadata to save
-        """
-        data = {"threads": threads, "current_thread_id": self.current_thread_id}
+        if not data.threads:
+            self._initialize_default_thread()
+            return
 
-        with open(self.threads_file, "w") as f:
-            json.dump(data, f, indent=2)
+        if data.current_thread_id and any(t["id"] == data.current_thread_id for t in data.threads):
+            self.current_thread_id = data.current_thread_id
+            return
 
-    def _load_threads(self) -> list[ThreadMetadata]:
-        """Load threads metadata from file.
+        fallback_id = self._select_most_recent_thread(data.threads)
+        with self.store.edit() as editable:
+            editable.current_thread_id = fallback_id
+        self.current_thread_id = fallback_id
 
-        Returns:
-            List of thread metadata
-        """
-        if not self.threads_file.exists():
-            return []
+    @staticmethod
+    def _select_most_recent_thread(threads: list[ThreadMetadata]) -> str:
+        """Pick the thread most recently used, falling back to creation time."""
+        if not threads:
+            raise ValueError("No threads available to select from.")
 
+        def sort_key(thread: ThreadMetadata) -> tuple[str, str]:
+            return (
+                thread.get("last_used") or thread.get("created") or "",
+                thread.get("created") or "",
+            )
+
+        return sorted(threads, key=sort_key, reverse=True)[0]["id"]
+
+    @staticmethod
+    def _is_recent_timestamp(value: str | None, *, minutes: int = 5) -> bool:
+        """Return True if the timestamp is within the grace window."""
+        if not value:
+            return False
+        trimmed = value[:-1] if value.endswith("Z") else value
         try:
-            with open(self.threads_file) as f:
-                data = json.load(f)
-                return data.get("threads", [])
-        except (json.JSONDecodeError, KeyError):
-            return []
+            timestamp = datetime.fromisoformat(trimmed)
+        except ValueError:
+            return False
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            timestamp = timestamp.astimezone(timezone.utc)
+        return timestamp >= datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
+    def _should_remove_metadata(
+        self,
+        thread: ThreadMetadata,
+        *,
+        current_thread_id: str | None,
+        grace_minutes: int = 5,
+    ) -> bool:
+        """Determine whether a metadata-only thread should be dropped."""
+        if thread["id"] == current_thread_id:
+            return False
+        return not self._is_recent_timestamp(thread.get("last_used"), minutes=grace_minutes)
+
+    # ------------------------------------------------------------------
+    # Core operations
+    # ------------------------------------------------------------------
     def create_thread(self, name: str | None = None, parent_id: str | None = None) -> str:
-        """Create a new thread with a pure UUID (LangGraph standard).
-
-        Args:
-            name: Optional human-readable name for the thread
-            parent_id: Optional parent thread ID (for forking)
-
-        Returns:
-            The new thread ID (pure UUID)
-
-        Example:
-            >>> manager.create_thread()
-            '550e8400-e29b-41d4-a716-446655440000'
-            >>> manager.create_thread(name="Web scraper project")
-            '9b2d5f7e-3c1a-4b8d-9e2f-1a3b4c5d6e7f'
-        """
-        # Generate pure UUID (LangGraph standard)
+        """Create a new thread with a unique UUID."""
         thread_id = str(uuid.uuid4())
+        now = _now_iso()
 
-        # Create metadata
-        now = datetime.utcnow().isoformat() + "Z"
-        metadata = ThreadMetadata(
-            id=thread_id,
-            assistant_id=self.assistant_id,
-            created=now,
-            last_used=now,
-            parent_id=parent_id,
-            name=name,
-        )
+        metadata: ThreadMetadata = {
+            "id": thread_id,
+            "assistant_id": self.assistant_id,
+            "created": now,
+            "last_used": now,
+            "parent_id": parent_id,
+            "name": name,
+        }
 
-        # Add to threads list
-        threads = self._load_threads()
-        threads.append(metadata)
-        self._save_threads(threads)
+        with self.store.edit() as data:
+            data.threads.append(metadata)
+            data.current_thread_id = thread_id
 
-        # Switch to new thread
         self.current_thread_id = thread_id
-
         return thread_id
 
     def switch_thread(self, thread_id: str) -> None:
-        """Switch to an existing thread.
+        """Switch to an existing thread."""
+        now = _now_iso()
 
-        Args:
-            thread_id: Thread ID to switch to (pure UUID)
+        with self.store.edit() as data:
+            thread = next((thread for thread in data.threads if thread["id"] == thread_id), None)
+            if not thread:
+                available = [t["id"] for t in data.threads]
+                raise ValueError(
+                    f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
+                )
 
-        Raises:
-            ValueError: If thread_id doesn't exist
+            thread["last_used"] = now
+            data.current_thread_id = thread_id
 
-        Example:
-            >>> manager.switch_thread("550e8400-e29b-41d4-a716-446655440000")
-        """
-        threads = self._load_threads()
-
-        # Find thread
-        thread = next((t for t in threads if t["id"] == thread_id), None)
-        if not thread:
-            available_ids = [t["id"] for t in threads]
-            raise ValueError(
-                f"Thread '{thread_id}' not found. Available threads: {', '.join(available_ids)}"
-            )
-
-        # Update last_used timestamp
-        thread["last_used"] = datetime.utcnow().isoformat() + "Z"
-
-        # Update current thread
         self.current_thread_id = thread_id
-        self._save_threads(threads)
 
     def list_threads(self) -> list[ThreadMetadata]:
-        """List all available threads, sorted by last_used (most recent first).
-
-        Returns:
-            List of thread metadata dictionaries
-
-        Example:
-            >>> threads = manager.list_threads()
-            >>> for thread in threads:
-            ...     print(f"{thread['id']}: {thread['name']}")
-            550e8400-e29b-41d4-a716-446655440000: Default conversation
-            9b2d5f7e-3c1a-4b8d-9e2f-1a3b4c5d6e7f: Web scraper project
-        """
-        threads = self._load_threads()
-        # Sort by last_used, most recent first
-        return sorted(threads, key=lambda t: t.get("last_used", ""), reverse=True)
+        """List all threads sorted by last activity."""
+        data = self._safe_load()
+        return sorted(
+            data.threads,
+            key=lambda t: (t.get("last_used") or t.get("created") or ""),
+            reverse=True,
+        )
 
     def get_current_thread_id(self) -> str:
-        """Get the current thread ID.
-
-        Returns:
-            Current thread ID
-
-        Example:
-            >>> manager.get_current_thread_id()
-            'agent:a1b2c3d4'
-        """
+        """Return the current thread ID, creating a default thread if needed."""
         if self.current_thread_id is None:
-            # Should never happen due to initialization, but handle gracefully
-            self._initialize_default_thread()
-
+            self._load_or_initialize()
+        if self.current_thread_id is None:
+            raise RuntimeError("Thread manager has no current thread.")
         return self.current_thread_id
 
     def fork_thread(
@@ -291,289 +222,175 @@ class ThreadManager:
         source_thread_id: str | None = None,
         name: str | None = None,
     ) -> str:
-        """Fork a thread, creating a new thread with the same conversation history.
-
-        The new thread will inherit all messages from the source thread up to the
-        current point. Future messages will diverge between the two threads.
-
-        This method performs a true fork by:
-        1. Creating a new thread with a unique UUID
-        2. Copying the checkpoint state from the source thread to the new thread
-        3. Storing metadata linking the new thread to its parent
-
-        Args:
-            agent: The compiled LangGraph agent (needed to copy checkpoint state)
-            source_thread_id: Thread to fork from (defaults to current thread)
-            name: Optional name for the forked thread
-
-        Returns:
-            The new thread ID (pure UUID)
-
-        Raises:
-            ValueError: If source_thread_id doesn't exist
-
-        Example:
-            >>> new_id = manager.fork_thread(agent)  # Fork current thread
-            >>> new_id = manager.fork_thread(agent, "550e8400-...", "Experiment branch")
-        """
-        # Default to current thread
+        """Fork a thread, copying checkpoint state to a new thread."""
         if source_thread_id is None:
-            source_thread_id = self.current_thread_id
+            source_thread_id = self.get_current_thread_id()
 
-        # Verify source thread exists
-        threads = self._load_threads()
-        source_thread = next((t for t in threads if t["id"] == source_thread_id), None)
+        source_data = self._safe_load()
+        source_thread = next((t for t in source_data.threads if t["id"] == source_thread_id), None)
         if not source_thread:
-            available_ids = [t["id"] for t in threads]
+            available = [t["id"] for t in source_data.threads]
             raise ValueError(
-                f"Source thread '{source_thread_id}' not found. Available: {', '.join(available_ids)}"
+                f"Source thread '{source_thread_id}' not found. Available: {', '.join(available)}"
             )
 
-        # Generate new thread ID
         new_thread_id = str(uuid.uuid4())
-
-        # Copy checkpoint state from source thread to new thread
         source_config = {"configurable": {"thread_id": source_thread_id}}
         state = agent.get_state(source_config)
-
-        # Update state to new thread (this creates a fork in the checkpointer)
         new_config = {"configurable": {"thread_id": new_thread_id}}
         agent.update_state(new_config, state.values)
 
-        # Create metadata with parent tracking
-        if name is None:
-            name = f"Fork of {source_thread.get('name', 'conversation')}"
+        now = _now_iso()
+        fork_name = name or f"Fork of {source_thread.get('name', 'conversation')}"
+        new_thread: ThreadMetadata = {
+            "id": new_thread_id,
+            "assistant_id": self.assistant_id,
+            "created": now,
+            "last_used": now,
+            "parent_id": source_thread_id,
+            "name": fork_name,
+        }
 
-        now = datetime.utcnow().isoformat() + "Z"
-        metadata = ThreadMetadata(
-            id=new_thread_id,
-            assistant_id=self.assistant_id,
-            created=now,
-            last_used=now,
-            parent_id=source_thread_id,
-            name=name,
-        )
+        with self.store.edit() as data:
+            parent = next((t for t in data.threads if t["id"] == source_thread_id), None)
+            if parent is None:
+                raise ValueError(f"Source thread '{source_thread_id}' not found.")
 
-        # Add to threads list
-        threads.append(metadata)
-        self._save_threads(threads)
+            parent["last_used"] = now
+            data.threads.append(new_thread)
+            data.current_thread_id = new_thread_id
 
-        # Switch to new forked thread
         self.current_thread_id = new_thread_id
-
         return new_thread_id
 
     def get_thread_metadata(self, thread_id: str) -> ThreadMetadata | None:
-        """Get metadata for a specific thread.
-
-        Args:
-            thread_id: Thread ID to get metadata for (pure UUID)
-
-        Returns:
-            Thread metadata dict, or None if not found
-
-        Example:
-            >>> metadata = manager.get_thread_metadata("550e8400-e29b-41d4-a716-446655440000")
-            >>> print(metadata['created'])
-            2025-01-11T20:30:00Z
-        """
-        threads = self._load_threads()
-        return next((t for t in threads if t["id"] == thread_id), None)
+        """Return metadata for a specific thread."""
+        data = self._safe_load()
+        return next((t for t in data.threads if t["id"] == thread_id), None)
 
     def rename_thread(self, thread_id: str, new_name: str) -> None:
-        """Rename a thread.
-
-        Args:
-            thread_id: Thread ID to rename (pure UUID)
-            new_name: New name for the thread
-
-        Raises:
-            ValueError: If thread_id doesn't exist
-
-        Example:
-            >>> manager.rename_thread("550e8400-e29b-41d4-a716-446655440000", "Production bugfix")
-        """
-        threads = self._load_threads()
-
-        # Find and update thread
-        thread = next((t for t in threads if t["id"] == thread_id), None)
-        if not thread:
-            raise ValueError(f"Thread '{thread_id}' not found")
-
-        thread["name"] = new_name
-        self._save_threads(threads)
+        """Rename a thread."""
+        with self.store.edit() as data:
+            thread = next((t for t in data.threads if t["id"] == thread_id), None)
+            if not thread:
+                raise ValueError(f"Thread '{thread_id}' not found.")
+            thread["name"] = new_name
 
     def delete_thread(self, thread_id: str, agent: "CompiledGraph") -> None:
-        """Delete a thread, removing both metadata and checkpoints.
-
-        This permanently deletes the thread from threads.json metadata and
-        removes all checkpoints from the checkpointer database.
-
-        Args:
-            thread_id: Thread ID to delete (pure UUID)
-            agent: The compiled LangGraph agent (needed to access checkpointer)
-
-        Raises:
-            ValueError: If thread_id doesn't exist or is the current thread
-
-        Example:
-            >>> manager.delete_thread("550e8400-e29b-41d4-a716-446655440000", agent)
-        """
-        # Prevent deleting current thread
-        if thread_id == self.current_thread_id:
+        """Delete a thread and its checkpoints."""
+        current_id = self.get_current_thread_id()
+        if thread_id == current_id:
             raise ValueError(
                 "Cannot delete the current thread. Switch to another thread first with "
-                "'/threads continue <id>' or create a new thread with '/new'"
+                "'/threads continue <id>' or create a new thread with '/new'."
             )
 
-        threads = self._load_threads()
-
-        # Find thread
-        thread = next((t for t in threads if t["id"] == thread_id), None)
-        if not thread:
-            available_ids = [t["id"] for t in threads]
+        data = self._safe_load()
+        target = next((t for t in data.threads if t["id"] == thread_id), None)
+        if not target:
+            available = [t["id"] for t in data.threads]
             raise ValueError(
-                f"Thread '{thread_id}' not found. Available threads: {', '.join(available_ids)}"
+                f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
             )
 
-        # Remove from metadata
-        threads = [t for t in threads if t["id"] != thread_id]
-        self._save_threads(threads)
-
-        # Delete checkpoints from database
         try:
-            agent.checkpointer.delete_thread(thread_id)
+            agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
         except AttributeError:
-            # Checkpointer doesn't have delete_thread method
+            # Checkpointer may not expose delete_thread (e.g., remote deployments)
             pass
 
+        with self.store.edit() as editable:
+            editable.threads = [t for t in editable.threads if t["id"] != thread_id]
+            if editable.current_thread_id == thread_id:
+                editable.current_thread_id = (
+                    editable.threads[0]["id"] if editable.threads else None
+                )
+            new_current = editable.current_thread_id
+
+        self.current_thread_id = new_current
+
+    # ------------------------------------------------------------------
+    # Maintenance operations
+    # ------------------------------------------------------------------
     def cleanup_old_threads(
         self, days_old: int, agent: "CompiledGraph", dry_run: bool = False
     ) -> tuple[int, list[str]]:
-        """Delete threads older than specified days.
+        """Delete threads whose last activity predates the cutoff."""
+        data = self._safe_load()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_old)
+        stale_threads: list[ThreadMetadata] = []
 
-        Args:
-            days_old: Delete threads not used in this many days
-            agent: The compiled LangGraph agent (needed to access checkpointer)
-            dry_run: If True, only return what would be deleted without deleting
-
-        Returns:
-            Tuple of (count of deleted threads, list of deleted thread names)
-
-        Example:
-            >>> count, names = manager.cleanup_old_threads(30, agent)
-            >>> print(f"Deleted {count} threads: {', '.join(names)}")
-        """
-        from datetime import datetime, timedelta, timezone
-
-        threads = self._load_threads()
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_old)
-
-        # Find threads to delete
-        threads_to_delete = []
-        for thread in threads:
-            # Skip current thread
-            if thread["id"] == self.current_thread_id:
+        for thread in data.threads:
+            if thread["id"] == self.get_current_thread_id():
                 continue
-
-            # Parse last_used timestamp (handles both with and without 'Z' suffix)
             last_used_str = thread.get("last_used", "")
             if last_used_str.endswith("Z"):
                 last_used_str = last_used_str[:-1]
-
             try:
                 last_used = datetime.fromisoformat(last_used_str).replace(tzinfo=timezone.utc)
-                if last_used < cutoff_date:
-                    threads_to_delete.append(thread)
             except (ValueError, AttributeError):
-                # Invalid timestamp, skip this thread
                 continue
+            if last_used < cutoff:
+                stale_threads.append(thread)
 
-        # If dry run, just return what would be deleted
         if dry_run:
-            return len(threads_to_delete), [t.get("name", t["id"]) for t in threads_to_delete]
+            preview = [thread.get("name") or thread["id"] for thread in stale_threads]
+            return len(preview), preview
 
-        # Actually delete threads
-        deleted_names = []
-        for thread in threads_to_delete:
+        deleted_ids: list[str] = []
+        deleted_names: list[str] = []
+        for thread in stale_threads:
+            thread_id = thread["id"]
             try:
-                # Don't use self.delete_thread to avoid current thread check
-                thread_id = thread["id"]
-
-                # Remove from metadata
-                threads = [t for t in threads if t["id"] != thread_id]
-
-                # Delete checkpoints
-                try:
-                    agent.checkpointer.delete_thread(thread_id)
-                except AttributeError:
-                    pass
-
-                deleted_names.append(thread.get("name", thread_id))
+                agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
             except Exception:
-                # If deletion fails, continue with others
                 continue
+            else:
+                deleted_ids.append(thread_id)
+                deleted_names.append(thread.get("name") or thread_id)
 
-        # Save updated metadata
-        self._save_threads(threads)
+        if not deleted_ids:
+            return 0, []
 
+        with self.store.edit() as editable:
+            editable.threads = [t for t in editable.threads if t["id"] not in set(deleted_ids)]
+            if editable.current_thread_id and all(
+                t["id"] != editable.current_thread_id for t in editable.threads
+            ):
+                editable.current_thread_id = (
+                    editable.threads[0]["id"] if editable.threads else None
+                )
+            new_current = editable.current_thread_id
+
+        self.current_thread_id = new_current
         return len(deleted_names), deleted_names
 
     def vacuum_database(self) -> dict[str, int]:
-        """Vacuum the SQLite checkpointer database to reclaim disk space.
-
-        This operation compacts the database file by removing deleted data
-        and reorganizing the file structure. Should be run after bulk deletions.
-
-        Returns:
-            Dict with 'size_before' and 'size_after' in bytes
-
-        Example:
-            >>> result = manager.vacuum_database()
-            >>> print(f"Reclaimed {result['size_before'] - result['size_after']} bytes")
-        """
+        """Run VACUUM on the SQLite checkpoint database."""
         import sqlite3
 
         checkpoint_db = self.agent_dir / "checkpoints.db"
-
-        # Get size before
         size_before = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
 
-        # Run VACUUM
         try:
             conn = sqlite3.connect(str(checkpoint_db))
             conn.execute("VACUUM")
             conn.close()
         except Exception:
-            # If vacuum fails, return original size
             return {"size_before": size_before, "size_after": size_before}
 
-        # Get size after
         size_after = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
-
         return {"size_before": size_before, "size_after": size_after}
 
     def get_database_stats(self) -> dict:
-        """Get statistics about the checkpointer database.
-
-        Returns:
-            Dict with database statistics:
-            - thread_count: Number of threads in metadata
-            - checkpoint_count: Number of checkpoints in database
-            - db_size_bytes: Size of checkpoints.db file
-            - oldest_thread: Oldest thread info (id, name, created)
-            - newest_thread: Newest thread info (id, name, created)
-
-        Example:
-            >>> stats = manager.get_database_stats()
-            >>> print(f"Threads: {stats['thread_count']}, Checkpoints: {stats['checkpoint_count']}")
-        """
+        """Gather simple statistics about the checkpoint database."""
         import sqlite3
 
-        threads = self._load_threads()
+        data = self._safe_load()
         checkpoint_db = self.agent_dir / "checkpoints.db"
 
-        # Count checkpoints in database
         checkpoint_count = 0
         if checkpoint_db.exists():
             try:
@@ -584,29 +401,150 @@ class ThreadManager:
             except Exception:
                 checkpoint_count = 0
 
-        # Database file size
         db_size_bytes = checkpoint_db.stat().st_size if checkpoint_db.exists() else 0
 
-        # Find oldest and newest threads
         oldest_thread = None
         newest_thread = None
-        if threads:
-            threads_sorted = sorted(threads, key=lambda t: t.get("created", ""))
+        if data.threads:
+            sorted_by_created = sorted(
+                data.threads, key=lambda t: t.get("created") or ""
+            )
+            oldest = sorted_by_created[0]
+            newest = sorted_by_created[-1]
             oldest_thread = {
-                "id": threads_sorted[0]["id"],
-                "name": threads_sorted[0].get("name"),
-                "created": threads_sorted[0].get("created"),
+                "id": oldest["id"],
+                "name": oldest.get("name"),
+                "created": oldest.get("created"),
             }
             newest_thread = {
-                "id": threads_sorted[-1]["id"],
-                "name": threads_sorted[-1].get("name"),
-                "created": threads_sorted[-1].get("created"),
+                "id": newest["id"],
+                "name": newest.get("name"),
+                "created": newest.get("created"),
             }
 
         return {
-            "thread_count": len(threads),
+            "thread_count": len(data.threads),
             "checkpoint_count": checkpoint_count,
             "db_size_bytes": db_size_bytes,
             "oldest_thread": oldest_thread,
             "newest_thread": newest_thread,
         }
+
+    def touch_thread(self, thread_id: str, *, reason: str | None = None) -> bool:
+        """Update the last-used timestamp for the given thread."""
+        timestamp = _now_iso()
+        try:
+            with self.store.edit() as data:
+                for thread in data.threads:
+                    if thread["id"] == thread_id:
+                        thread["last_used"] = timestamp
+                        return True
+        except ThreadStoreCorruptError:
+            self._load_or_initialize()
+        return False
+
+    # ------------------------------------------------------------------
+    # Reconciliation utilities
+    # ------------------------------------------------------------------
+    def reconcile_with_checkpointer(self, apply: bool = False) -> ThreadSyncReport:
+        """Align threads.json metadata with checkpoint contents."""
+        data = self._safe_load()
+        metadata_map = {thread["id"]: thread for thread in data.threads}
+        metadata_ids = set(metadata_map.keys())
+        checkpoint_ids = self._list_checkpoint_thread_ids()
+
+        metadata_only_candidates = [
+            metadata_map[mid]
+            for mid in (metadata_ids - checkpoint_ids)
+            if self._should_remove_metadata(
+                metadata_map[mid], current_thread_id=data.current_thread_id
+            )
+        ]
+        checkpoint_only_ids = sorted(checkpoint_ids - metadata_ids)
+
+        if not apply:
+            return ThreadSyncReport(
+                metadata_only=metadata_only_candidates,
+                checkpoint_only=checkpoint_only_ids,
+                removed=[],
+                added=[],
+                current_thread_changed=False,
+                new_current_thread_id=data.current_thread_id,
+            )
+
+        removed_threads: list[ThreadMetadata] = []
+        added_threads: list[ThreadMetadata] = []
+        current_changed = False
+
+        with self.store.edit() as editable:
+            live_ids = {thread["id"] for thread in editable.threads}
+            stale_threads = [
+                cast(ThreadMetadata, thread)
+                for thread in editable.threads
+                if thread["id"] not in checkpoint_ids
+                and self._should_remove_metadata(
+                    cast(ThreadMetadata, thread),
+                    current_thread_id=editable.current_thread_id,
+                )
+            ]
+            stale_ids = {thread["id"] for thread in stale_threads}
+            missing_ids = sorted(checkpoint_ids - live_ids)
+
+            if stale_ids:
+                editable.threads = [
+                    thread for thread in editable.threads if thread["id"] not in stale_ids
+                ]
+                removed_threads = stale_threads
+
+            if missing_ids:
+                now = _now_iso()
+                for thread_id in missing_ids:
+                    recovered: ThreadMetadata = {
+                        "id": thread_id,
+                        "assistant_id": self.assistant_id,
+                        "created": now,
+                        "last_used": now,
+                        "parent_id": None,
+                        "name": None,
+                    }
+                    editable.threads.append(recovered)
+                    added_threads.append(recovered)
+
+            if editable.current_thread_id and all(
+                thread["id"] != editable.current_thread_id for thread in editable.threads
+            ):
+                editable.current_thread_id = (
+                    editable.threads[0]["id"] if editable.threads else None
+                )
+                current_changed = True
+
+            new_current = editable.current_thread_id
+
+        self.current_thread_id = new_current
+
+        return ThreadSyncReport(
+            metadata_only=metadata_only_candidates,
+            checkpoint_only=checkpoint_only_ids,
+            removed=removed_threads,
+            added=added_threads,
+            current_thread_changed=current_changed,
+            new_current_thread_id=new_current,
+        )
+
+    def _list_checkpoint_thread_ids(self) -> set[str]:
+        """Return thread IDs present in the SQLite checkpointer."""
+        import sqlite3
+
+        checkpoint_db = self.agent_dir / "checkpoints.db"
+        if not checkpoint_db.exists():
+            return set()
+
+        try:
+            conn = sqlite3.connect(str(checkpoint_db))
+            cursor = conn.execute("SELECT DISTINCT thread_id FROM checkpoints")
+            thread_ids = {row[0] for row in cursor.fetchall() if row[0]}
+            conn.close()
+        except Exception:
+            return set()
+
+        return thread_ids

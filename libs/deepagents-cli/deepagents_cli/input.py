@@ -21,7 +21,7 @@ from .config import COLORS, COMMANDS, SessionState, console
 
 # Regex patterns for context-aware completion
 AT_MENTION_RE = re.compile(r"@(?P<path>(?:[^\s@]|(?<=\\)\s)*)$")
-SLASH_COMMAND_RE = re.compile(r"^/(?P<command>[a-z]*)$")
+SLASH_COMMAND_RE = re.compile(r"^/(?P<command>[^\n]*)$")
 
 
 class FilePathCompleter(Completer):
@@ -77,10 +77,10 @@ class CommandCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         """Get command completions when / is at the start."""
-        text = document.text_before_cursor
+        current_line = document.current_line_before_cursor
 
-        # Use regex to detect /command pattern at start of line
-        m = SLASH_COMMAND_RE.match(text)
+        # Use regex to detect /command pattern at start of current line
+        m = SLASH_COMMAND_RE.match(current_line)
         if not m:
             return  # Not in a /command context
 
@@ -88,7 +88,7 @@ class CommandCompleter(Completer):
 
         # Match commands that start with the fragment (case-insensitive)
         for cmd_name, cmd_desc in COMMANDS.items():
-            if cmd_name.startswith(command_fragment.lower()):
+            if cmd_name.lower().startswith(command_fragment.lower()):
                 yield Completion(
                     text=cmd_name,
                     start_position=-len(command_fragment),  # Fixed position for original document
@@ -227,7 +227,7 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         buffer.delete_before_cursor(count=1)
 
         # Check if we're in a completion context (@ or /)
-        text = buffer.document.text_before_cursor
+        text = buffer.document.current_line_before_cursor
         if AT_MENTION_RE.search(text) or SLASH_COMMAND_RE.match(text):
             # Retrigger completion
             buffer.start_completion(select_first=False)

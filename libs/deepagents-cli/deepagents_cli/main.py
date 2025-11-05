@@ -96,9 +96,16 @@ def parse_args():
 
 async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0):
     """Main CLI loop."""
+    from .server_client import is_server_available
+
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
+
+    # Show server status
+    if is_server_available():
+        console.print("[green]● Connected to LangGraph server[/green]")
+        console.print()
 
     if tavily_client is None:
         console.print(
@@ -173,6 +180,31 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
 async def main(assistant_id: str, session_state):
     """Main entry point."""
+    from .server_client import is_server_available, start_server_if_needed
+
+    # Check if server is running, offer to start if not
+    if not is_server_available():
+        console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
+        console.print()
+        console.print("The DeepAgents CLI now requires the LangGraph server for thread management.")
+        console.print("This enables features like message history, thread naming, and Studio integration.")
+        console.print()
+
+        # Try to start server automatically
+        console.print("[dim]Starting LangGraph dev server...[/dim]")
+        if start_server_if_needed():
+            console.print("[green]✓ Server started successfully![/green]")
+            console.print()
+        else:
+            console.print("[red]✗ Failed to start server automatically[/red]")
+            console.print()
+            console.print("Please start the server manually in another terminal:")
+            console.print("  [cyan]langgraph dev[/cyan]")
+            console.print()
+            console.print("Then restart the CLI.")
+            import sys
+            sys.exit(1)
+
     # Create the model (checks API keys)
     model = create_model()
 

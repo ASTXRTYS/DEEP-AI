@@ -36,24 +36,15 @@ DEEP_AGENTS_ASCII = """
  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
 """
 
-# Interactive commands
+# Interactive commands (shown in autocomplete)
+# Only essential, high-signal commands are listed here for clean UX.
+# Advanced commands still work but are hidden from autocomplete.
 COMMANDS = {
-    "clear": "Clear screen and reset conversation",
-    "help": "Show help information",
-    "tokens": "Show token usage for current session",
-    "quit": "Exit the CLI",
-    "exit": "Exit the CLI",
-    "new": "Create a new conversation thread",
-    "threads": "List all conversation threads",
-    "threads continue <id>": "Switch to an existing thread",
-    "threads fork [name]": "Fork current thread with optional name",
-    "threads info [id]": "Show detailed thread information",
-    "threads rename <id> <name>": "Rename a thread",
-    "threads delete <id>": "Delete a thread (requires confirmation)",
-    "threads cleanup [--days N]": "Delete threads older than N days (default: 30)",
-    "threads sync": "Reconcile metadata with stored checkpoints",
-    "threads vacuum": "Reclaim disk space from deleted threads",
-    "threads stats": "Show database statistics (threads, checkpoints, size)",
+    "help": "Show help and available commands",
+    "new [name]": "Create a new thread",
+    "threads": "Switch threads (interactive)",
+    "clear": "Clear screen",
+    "quit": "Exit",
 }
 
 

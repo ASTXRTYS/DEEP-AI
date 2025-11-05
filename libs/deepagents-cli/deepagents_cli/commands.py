@@ -1,14 +1,23 @@
 """Command handlers for slash commands and bash execution."""
 
 import subprocess
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.panel import Panel
 from rich.table import Table
 
+try:  # POSIX-only modules for raw terminal input
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - exercised indirectly via fallback paths
+    termios = None
+    tty = None
+
 from .config import COLORS, DEEP_AGENTS_ASCII, console
 from .ui import TokenTracker, show_interactive_help
+from .server_client import get_thread_data, extract_first_user_message, extract_last_message_preview
 
 
 def relative_time(iso_timestamp: str) -> str:
@@ -24,7 +33,12 @@ def relative_time(iso_timestamp: str) -> str:
         # Parse ISO timestamp (with or without 'Z')
         ts_str = iso_timestamp.rstrip('Z')
         ts = datetime.fromisoformat(ts_str)
-        now = datetime.utcnow()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+
+        now = datetime.now(timezone.utc)
         delta = now - ts
 
         seconds = delta.total_seconds()
@@ -73,6 +87,115 @@ def find_thread_by_partial_id(thread_manager, partial_id: str):
     return matches[0], matches
 
 
+def _enrich_thread_with_server_data(thread: dict) -> dict:
+    """Enrich thread metadata with data from server API.
+
+    Args:
+        thread: Thread metadata from threads.json
+
+    Returns:
+        Enriched thread dict with preview and auto-name
+    """
+    thread_data = get_thread_data(thread["id"])
+
+    if thread_data:
+        # Auto-name unnamed threads using first message
+        if not thread.get("name") or thread.get("name") == "(unnamed)":
+            first_msg = extract_first_user_message(thread_data)
+            if first_msg:
+                thread["display_name"] = first_msg
+            else:
+                thread["display_name"] = "(unnamed)"
+        else:
+            thread["display_name"] = thread["name"]
+
+        # Add message preview
+        preview = extract_last_message_preview(thread_data)
+        if preview:
+            thread["preview"] = preview
+    else:
+        # Server not available - fallback
+        thread["display_name"] = thread.get("name") or "(unnamed)"
+
+    return thread
+
+
+def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
+    """Build a single-line summary describing a thread for the picker."""
+
+    display_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+    short_id = thread["id"][:8]
+    last_used = relative_time(thread.get("last_used", ""))
+    token_count = thread.get("token_count", 0)
+    preview = thread.get("preview")
+
+    # Format token count with comma separators for readability
+    token_text = f"{token_count:,} tokens"
+
+    current_suffix = " · current" if thread["id"] == current_thread_id else ""
+
+    # Build summary with optional preview
+    if preview:
+        return f"{short_id}  {display_name}  · {token_text}  · {preview}  · {last_used}{current_suffix}"
+    else:
+        return f"{short_id}  {display_name}  · {token_text}  · Last: {last_used}{current_suffix}"
+
+
+def _select_thread_interactively(threads, current_thread_id: str | None) -> str | None:
+    """Present an interactive picker to choose a thread.
+
+    Uses a simple numbered list for reliable selection across all terminals.
+    Returns the selected thread ID, or ``None`` if the selection was cancelled.
+    """
+    if not threads:
+        return None
+
+    return _select_thread_fallback(threads, current_thread_id)
+
+
+def _select_thread_fallback(threads, current_thread_id: str | None) -> str | None:
+    """Fallback selection that works without raw TTY capabilities."""
+
+    console.print()
+    console.print("Select a thread:")
+
+    default_index = 0
+    if current_thread_id:
+        for idx, thread in enumerate(threads):
+            if thread["id"] == current_thread_id:
+                default_index = idx
+                break
+
+    for idx, thread in enumerate(threads, start=1):
+        summary = _format_thread_summary(thread, current_thread_id)
+        selector = "*" if idx - 1 == default_index else " "
+        console.print(f"  [{selector}] {idx}. {summary}")
+
+    console.print()
+    prompt = f"Choice (1-{len(threads)}; Enter to cancel) [default={default_index + 1}]: "
+    try:
+        choice = input(prompt).strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        return None
+
+    if not choice:
+        return threads[default_index]["id"]
+
+    if not choice.isdigit():
+        console.print(f"[red]Invalid selection: {choice}[/red]")
+        console.print()
+        return None
+
+    selected_idx = int(choice) - 1
+    if selected_idx < 0 or selected_idx >= len(threads):
+        console.print(f"[red]Selection out of range: {choice}[/red]")
+        console.print()
+        return None
+
+    return threads[selected_idx]["id"]
+
+
 def handle_thread_commands(args: str, thread_manager, agent) -> bool:
     """Handle /threads subcommands.
 
@@ -86,8 +209,58 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
     """
     args = args.strip()
 
-    # /threads (no args) - List threads
+    # /threads (no args) - Show interactive picker
     if not args:
+        threads = thread_manager.list_threads()
+        current_id = thread_manager.get_current_thread_id()
+
+        if not threads:
+            console.print()
+            console.print("[yellow]No threads available.[/yellow]")
+            console.print()
+            return True
+
+        # Enrich threads with server data (messages, preview, auto-names)
+        enriched_threads = [_enrich_thread_with_server_data(t) for t in threads]
+
+        console.print()
+        try:
+            target_id = _select_thread_interactively(enriched_threads, current_id)
+        except KeyboardInterrupt:
+            console.print("\n[red]Thread selection interrupted.[/red]")
+            console.print()
+            return True
+
+        console.print()
+
+        if not target_id:
+            console.print("[dim]Thread selection cancelled.[/dim]")
+            console.print()
+            return True
+
+        # Switch to selected thread
+        try:
+            thread_manager.switch_thread(target_id)
+            thread = thread_manager.get_thread_metadata(target_id)
+            console.print()
+            console.print(
+                f"[{COLORS['primary']}]✓ Switched to thread: {thread.get('name') or '(unnamed)'} ({target_id[:8]})[/{COLORS['primary']}]"
+            )
+            console.print()
+        except ValueError as e:
+            console.print()
+            console.print(f"[red]Error: {e}[/red]")
+            console.print()
+
+        return True
+
+    # Parse subcommand
+    parts = args.split(maxsplit=1)
+    subcommand = parts[0].lower()
+    subargs = parts[1] if len(parts) > 1 else ""
+
+    # /threads list - Show table overview
+    if subcommand == "list":
         threads = thread_manager.list_threads()
         current_id = thread_manager.get_current_thread_id()
 
@@ -108,6 +281,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         table.add_column("", width=2)  # Current thread indicator
         table.add_column("ID", style=COLORS['primary'], width=10)
         table.add_column("Name", style="white")
+        table.add_column("Tokens", style=COLORS['accent'], width=12, justify="right")
         table.add_column("Created", style=COLORS['dim'], width=12)
         table.add_column("Last Used", style=COLORS['dim'], width=12)
 
@@ -116,6 +290,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
             indicator = "→" if is_current else ""
             thread_id_short = thread['id'][:8]
             name = thread.get('name') or "(unnamed)"
+            token_count = thread.get('token_count', 0)
             created = relative_time(thread.get('created', ''))
             last_used = relative_time(thread.get('last_used', ''))
 
@@ -126,6 +301,7 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
                 indicator,
                 thread_id_short,
                 name,
+                f"{token_count:,}",
                 created,
                 last_used,
                 style=style
@@ -134,25 +310,44 @@ def handle_thread_commands(args: str, thread_manager, agent) -> bool:
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Use /threads continue <id> to switch threads[/dim]")
+        console.print(
+            "[dim]Tip: Use /threads to open the picker[/dim]"
+        )
         console.print()
         return True
 
-    # Parse subcommand
-    parts = args.split(maxsplit=1)
-    subcommand = parts[0].lower()
-    subargs = parts[1] if len(parts) > 1 else ""
-
     # /threads continue <id>
     if subcommand == "continue":
-        if not subargs:
+        threads = thread_manager.list_threads()
+        if not threads:
             console.print()
-            console.print("[yellow]Usage: /threads continue <id>[/yellow]")
+            console.print("[yellow]No threads available to switch to.[/yellow]")
             console.print()
             return True
 
+        target_id = subargs.strip()
+
+        if not target_id:
+            # Enrich threads with server data for picker
+            enriched_threads = [_enrich_thread_with_server_data(t) for t in threads]
+
+            console.print()
+            try:
+                target_id = _select_thread_interactively(enriched_threads, thread_manager.get_current_thread_id())
+            except KeyboardInterrupt:
+                console.print("\n[red]Thread selection interrupted.[/red]")
+                console.print()
+                return True
+
+            console.print()
+
+            if not target_id:
+                console.print("[dim]Thread selection cancelled.[/dim]")
+                console.print()
+                return True
+
         try:
-            thread, _ = find_thread_by_partial_id(thread_manager, subargs)
+            thread, _ = find_thread_by_partial_id(thread_manager, target_id)
             thread_manager.switch_thread(thread['id'])
 
             console.print()

@@ -594,6 +594,15 @@ def execute_task(
         if token_tracker and (captured_input_tokens or captured_output_tokens):
             token_tracker.add(captured_input_tokens, captured_output_tokens)
 
+            # Persist token count to thread metadata
+            if session_state and session_state.thread_manager and thread_id:
+                try:
+                    session_state.thread_manager.update_token_count(
+                        thread_id, token_tracker.current_context
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
     # Touch the thread so cleanup/TTL logic sees recent activity
     if session_state and session_state.thread_manager and thread_id:
         try:

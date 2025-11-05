@@ -34,6 +34,7 @@ class ThreadMetadata(TypedDict):
     last_used: str
     parent_id: str | None
     name: str | None
+    token_count: int | None  # Current context token count
 
 
 @dataclass
@@ -81,7 +82,10 @@ class ThreadManager:
 
     def _initialize_default_thread(self) -> None:
         """Create a default thread when none exist."""
-        default_id = str(uuid.uuid4())
+        from .server_client import create_thread_on_server
+
+        # Create thread on server
+        default_id = create_thread_on_server(name="Default conversation")
         now = _now_iso()
         default_thread: ThreadMetadata = {
             "id": default_id,
@@ -90,6 +94,7 @@ class ThreadManager:
             "last_used": now,
             "parent_id": None,
             "name": "Default conversation",
+            "token_count": 0,
         }
 
         with self.store.edit() as data:
@@ -162,8 +167,11 @@ class ThreadManager:
     # Core operations
     # ------------------------------------------------------------------
     def create_thread(self, name: str | None = None, parent_id: str | None = None) -> str:
-        """Create a new thread with a unique UUID."""
-        thread_id = str(uuid.uuid4())
+        """Create a new thread via the server API."""
+        from .server_client import create_thread_on_server
+
+        # Create thread on server
+        thread_id = create_thread_on_server(name=name)
         now = _now_iso()
 
         metadata: ThreadMetadata = {
@@ -173,6 +181,7 @@ class ThreadManager:
             "last_used": now,
             "parent_id": parent_id,
             "name": name,
+            "token_count": 0,
         }
 
         with self.store.edit() as data:
@@ -222,7 +231,9 @@ class ThreadManager:
         source_thread_id: str | None = None,
         name: str | None = None,
     ) -> str:
-        """Fork a thread, copying checkpoint state to a new thread."""
+        """Fork a thread via the server API."""
+        from .server_client import fork_thread_on_server
+
         if source_thread_id is None:
             source_thread_id = self.get_current_thread_id()
 
@@ -234,7 +245,10 @@ class ThreadManager:
                 f"Source thread '{source_thread_id}' not found. Available: {', '.join(available)}"
             )
 
-        new_thread_id = str(uuid.uuid4())
+        # Fork thread on server
+        new_thread_id = fork_thread_on_server(source_thread_id)
+
+        # Also copy state in local checkpointer for compatibility
         source_config = {"configurable": {"thread_id": source_thread_id}}
         state = agent.get_state(source_config)
         new_config = {"configurable": {"thread_id": new_thread_id}}
@@ -242,6 +256,8 @@ class ThreadManager:
 
         now = _now_iso()
         fork_name = name or f"Fork of {source_thread.get('name', 'conversation')}"
+        # Get token count for the forked thread
+        source_token_count = source_thread.get("token_count", 0)
         new_thread: ThreadMetadata = {
             "id": new_thread_id,
             "assistant_id": self.assistant_id,
@@ -249,6 +265,7 @@ class ThreadManager:
             "last_used": now,
             "parent_id": source_thread_id,
             "name": fork_name,
+            "token_count": source_token_count,  # Inherit from parent
         }
 
         with self.store.edit() as data:
@@ -506,6 +523,7 @@ class ThreadManager:
                         "last_used": now,
                         "parent_id": None,
                         "name": None,
+                        "token_count": 0,  # Will be updated on next interaction
                     }
                     editable.threads.append(recovered)
                     added_threads.append(recovered)
@@ -548,3 +566,16 @@ class ThreadManager:
             return set()
 
         return thread_ids
+
+    def update_token_count(self, thread_id: str, token_count: int) -> None:
+        """Update the token count for a thread.
+
+        Args:
+            thread_id: The thread ID to update.
+            token_count: The new token count (current context size).
+        """
+        with self.store.edit() as data:
+            for thread in data.threads:
+                if thread["id"] == thread_id:
+                    thread["token_count"] = token_count
+                    break

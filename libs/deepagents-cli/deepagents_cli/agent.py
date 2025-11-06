@@ -149,8 +149,23 @@ When using the write_todos tool:
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
 
 
-def create_agent_with_config(model, assistant_id: str, tools: list):
-    """Create and configure an agent with the specified model and tools."""
+def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer=None):
+    """Create and configure an agent with the specified model and tools.
+
+    Args:
+        model: The LLM model instance (e.g., ChatAnthropic).
+        assistant_id: Unique agent identifier (used for file organization).
+        tools: List of tools available to the agent.
+        checkpointer: Optional pre-initialized checkpointer.
+                     - If None: Creates default SqliteSaver (local CLI, tests)
+                     - If AsyncSqliteSaver: Use for async CLI (via main.py context manager)
+                     - If InMemorySaver: Use for unit tests
+                     - If ServerCheckpointer: Server runtime injects this
+                     Server exports should pass checkpointer=None (server injects its own).
+
+    Returns:
+        Compiled agent graph with configured middleware and persistence.
+    """
     shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
     )
@@ -164,18 +179,20 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         agent_md.write_text(source_content)
 
     # Set up persistent checkpointing for short-term memory (conversations)
-    import sqlite3
+    # Only create default SqliteSaver if no checkpointer was provided
+    if checkpointer is None:
+        import sqlite3
 
-    checkpoint_db = agent_dir / "checkpoints.db"
-    # Direct construction - proper way for long-running applications
-    conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
-    checkpointer = SqliteSaver(conn)
+        checkpoint_db = agent_dir / "checkpoints.db"
+        # Direct construction - proper way for long-running applications
+        conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
 
-    # Initialize checkpointer schema if needed (first time setup)
-    try:
-        checkpointer.setup()
-    except Exception:
-        pass  # Already set up
+        # Initialize checkpointer schema if needed (first time setup)
+        try:
+            checkpointer.setup()
+        except Exception:
+            pass  # Already set up
 
     # Set up PostgreSQL store for cross-conversation long-term memory
     import psycopg

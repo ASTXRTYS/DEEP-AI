@@ -45,8 +45,13 @@ def check_cli_dependencies() -> None:
         missing.append("prompt-toolkit")
 
     if missing:
-        for _pkg in missing:
-            pass
+        console.print("[bold red]Missing required CLI dependencies:[/bold red]")
+        for pkg in missing:
+            console.print(f"  • {pkg}")
+        console.print()
+        console.print(
+            "Install them with: [cyan]pip install 'deepagents[cli]'[/cyan] or add them to your environment."
+        )
         sys.exit(1)
 
 
@@ -190,12 +195,16 @@ async def main(assistant_id: str, session_state) -> None:
 
         # Try to start server automatically
         console.print("[dim]Starting LangGraph dev server...[/dim]")
-        if start_server_if_needed():
+        started, error_message = start_server_if_needed()
+        if started:
             console.print("[green]✓ Server started successfully![/green]")
             console.print()
         else:
             console.print("[red]✗ Failed to start server automatically[/red]")
             console.print()
+            if error_message:
+                console.print(f"[red]{error_message}[/red]")
+                console.print()
             console.print("Please start the server manually in another terminal:")
             console.print("  [cyan]langgraph dev[/cyan]")
             console.print()
@@ -217,19 +226,58 @@ async def main(assistant_id: str, session_state) -> None:
     if tavily_client is not None:
         tools.append(web_search)
 
-    agent = create_agent_with_config(model, assistant_id, tools)
+    # Initialize checkpointer based on USE_ASYNC_CHECKPOINTER flag
+    from .config import USE_ASYNC_CHECKPOINTER
 
-    # Calculate baseline token count for accurate token tracking
-    from .agent import get_system_prompt
-    from .token_utils import calculate_baseline_tokens
+    if USE_ASYNC_CHECKPOINTER:
+        # Async mode: Use AsyncSqliteSaver with context manager
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    system_prompt = get_system_prompt()
-    baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+        # Ensure agent directory exists before creating database
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_db = agent_dir / "checkpoints.db"
 
-    try:
-        await simple_cli(agent, assistant_id, session_state, baseline_tokens)
-    except Exception as e:
-        console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
+        # from_conn_string expects a file path, not a URI
+        db_path = str(checkpoint_db.resolve())
+
+        try:
+            async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
+                await checkpointer.setup()
+
+                # Create agent with async checkpointer
+                agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
+
+                # Calculate baseline token count for accurate token tracking
+                from .agent import get_system_prompt
+                from .token_utils import calculate_baseline_tokens
+
+                system_prompt = get_system_prompt()
+                baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+
+                # Run CLI loop inside async context (keeps connection alive)
+                await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+
+        except KeyboardInterrupt:
+            # Context manager exits cleanly on Ctrl+C
+            console.print("\n[yellow]Interrupted[/yellow]")
+        except Exception as e:
+            console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
+            raise
+    else:
+        # Sync mode: Use default SqliteSaver (created by agent factory)
+        agent = create_agent_with_config(model, assistant_id, tools, checkpointer=None)
+
+        # Calculate baseline token count for accurate token tracking
+        from .agent import get_system_prompt
+        from .token_utils import calculate_baseline_tokens
+
+        system_prompt = get_system_prompt()
+        baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+
+        try:
+            await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+        except Exception as e:
+            console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
 
 def cli_main() -> None:

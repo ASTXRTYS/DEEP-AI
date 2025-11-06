@@ -4,703 +4,682 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## Project Overview
+## Overview
 
-**DeepAgents CLI** - An AI coding assistant powered by Claude Sonnet 4.5 with persistent memory, file operations, and web search capabilities. Built on LangChain's Deep Agents framework (LangGraph).
+DeepAgents CLI is an interactive AI coding assistant built on LangGraph with persistent memory, file operations, and web search. The architecture is designed for both standalone CLI use and LangGraph server deployment with Studio debugging.
 
-**Location**: `/Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents-cli`
-
-**Parent Repo**: Part of a monorepo at `/Users/Jason/astxrtys/DevTools/deepagents/`:
-- `libs/deepagents/` - Core Deep Agents library
-- `libs/deepagents-cli/` - This CLI package
-
-**Fork Status**: This is a fork of [langchain-ai/deepagents](https://github.com/langchain-ai/deepagents) with custom enhancements.
+**Key Characteristic**: The same agent code runs in two modes (CLI and server) with different persistence layers but identical behavior.
 
 ---
 
 ## Development Commands
 
-### Testing
+### Installation
 ```bash
-# Run all tests
-make test
-
-# Run specific test file
-make test TEST_FILE=tests/test_file_ops.py
-
-# Run tests directly with pytest
-uv run pytest --disable-socket --allow-unix-socket tests/ --timeout 10
-```
-
-**Test Configuration:**
-- Socket access disabled to prevent unintended network calls
-- Unix sockets allowed for local IPC
-- 10-second timeout per test
-- Tests located in `tests/` directory
-
-### Linting and Formatting
-```bash
-# Check code style
-make lint
-
-# Auto-format code
-make format
-
-# Lint only changed files (vs master)
-make lint_diff
-make format_diff
-
-# Direct ruff usage
-uv run ruff check deepagents_cli/
-uv run ruff format deepagents_cli/
-```
-
-**Linting Configuration** (`pyproject.toml`):
-- Line length: 100 characters
-- Ruff with "ALL" rules enabled by default
-- Google-style docstrings
-- Key ignores: COM812, ISC001, PERF203, SLF001, PLC0415, PLR0913, PLC0414, C901
-
-### Building and Installation
-```bash
-# Development install (editable mode)
-cd /Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents-cli
+# Install in editable mode (changes reflect immediately)
 python3.11 -m pip install -e . --break-system-packages
 
-# Or use uv (faster)
-uv pip install -e .
-
-# Reinstall dependencies
-uv pip install -e . --force-reinstall
+# Verify installation
+deepagents --help
 ```
 
 ### Running the CLI
 ```bash
-# Basic usage
+# Standalone CLI (most common for development)
 deepagents
 
-# With specific agent
+# With specific agent profile
 deepagents --agent myagent
 
 # Auto-approve mode (no HITL prompts)
 deepagents --auto-approve
-
-# Management commands
-deepagents list            # List all agents
-deepagents reset --agent myagent
-deepagents help
 ```
 
-### LangGraph Server
+### LangGraph Server (for Studio debugging)
 ```bash
-# Start dev server only
-./start-dev-server.sh
-# Or: langgraph dev
+# Terminal 1: Start server
+langgraph dev
 
-# Start server + CLI together (recommended)
-./start-dev.sh
+# Terminal 2: Use CLI (connects to server)
+deepagents
 
-# Start in tmux split panes
-./start-tmux.sh
+# Or use helper scripts:
+./start-dev.sh        # Server + CLI together
+./start-dev-server.sh # Server only
+./start-tmux.sh       # Split panes in tmux
 ```
 
-**Server URLs:**
-- API: http://127.0.0.1:2024
-- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- API Docs: http://127.0.0.1:2024/docs
+### Studio UI
+- URL: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- Free for local development
+- Provides visual graph execution, state inspection, time-travel debugging
+
+### Testing
+```bash
+# Run tests (when test suite exists)
+pytest
+
+# Type checking
+mypy deepagents_cli
+
+# Linting
+ruff check deepagents_cli
+```
 
 ---
 
-## Critical Architecture Decisions
+## Architecture Deep Dive
 
-### 1. Shared Agent Creation Logic
+### The Dual-Mode Execution Pattern
 
-**CRITICAL**: Both CLI and LangGraph server MUST use the exact same agent creation logic.
+**Location**: `execution.py:256-368`
 
-- **CLI**: Uses `create_agent_with_config()` from `agent.py`
-- **Server**: Uses `create_agent_with_config()` from `graph.py` which imports from `agent.py`
-- **Why**: Ensures consistency - server runs the EXACT same agent as CLI
+**Critical Understanding**: The agent streams in dual mode (`["messages", "updates"]`) to handle both content and HITL interrupts in a single stream. This is NOT obvious from reading the code once.
 
-### 2. Import Rules for graph.py
+```python
+async for chunk in agent.astream(
+    stream_input,
+    stream_mode=["messages", "updates"],  # ← Dual mode is critical
+    subgraphs=True,
+    config=config,
+):
+    namespace, current_stream_mode, data = chunk  # ← 3-tuple unpacking
 
-**CRITICAL**: `graph.py` MUST use ABSOLUTE imports, NOT relative imports.
+    if current_stream_mode == "updates":
+        # Handle interrupts and todos here
+        if "__interrupt__" in data:
+            interrupt_occurred = True
+
+    elif current_stream_mode == "messages":
+        # Handle content streaming here
+```
+
+**Why This Matters**:
+- `updates` stream contains interrupts (HITL) and state updates (todos)
+- `messages` stream contains AI responses and tool calls
+- Both must be processed in the same loop
+- Breaking this pattern will break HITL functionality
+
+### Tool Call Buffering Architecture
+
+**Location**: `execution.py:224-492`
+
+**The Problem**: Streaming tool calls arrive as partial chunks that must be assembled before display.
+
+**The Solution**: A buffer keyed by chunk index that accumulates pieces:
+
+```python
+tool_call_buffers: dict[str | int, dict] = {}
+
+# Each chunk updates the buffer
+buffer = tool_call_buffers.setdefault(
+    buffer_key,
+    {"name": None, "id": None, "args": None, "args_parts": []},
+)
+
+# When complete, display once and remove from buffer
+if buffer_complete:
+    displayed_tool_ids.add(buffer_id)
+    tool_call_buffers.pop(buffer_key, None)
+    console.print(format_tool_display(...))
+```
+
+**Critical**:
+- Tool calls must only be displayed ONCE (track with `displayed_tool_ids`)
+- Args may come as JSON string chunks that need parsing
+- Invalid JSON chunks are silently skipped (waiting for more data)
+
+### Agent Creation: CLI vs Server
+
+**Critical Architecture Decision**: The same `create_agent_with_config()` function serves both CLI and server, but they differ in persistence handling.
+
+**CLI Mode** (`main.py:229`):
+```python
+# CLI creates agent WITH custom persistence
+agent = create_agent_with_config(model, assistant_id, tools)
+# This includes SqliteSaver checkpointer and PostgresStore
+```
+
+**Server Mode** (`graph.py:82-93`):
+```python
+# Server creates agent WITHOUT checkpointer/store
+graph = create_deep_agent(
+    model=model,
+    system_prompt=_get_system_prompt(),
+    tools=tools,
+    backend=backend,
+    middleware=agent_middleware,
+    # NO checkpointer or store - server provides these
+)
+```
+
+**Why**: LangGraph server v0.4.20+ explicitly rejects custom checkpointers. The server manages its own persistence for multi-instance deployments, while CLI uses local SQLite for single-user scenarios.
+
+**Implication**: You CANNOT use the same graph instance for both CLI and server. They must be created separately.
+
+### Three-Layer Persistence System
+
+Understanding the persistence architecture requires reading `agent.py`, `graph.py`, and the `deepagents` library together.
+
+**Layer 1: Thread-Level Checkpoints** (Conversation State)
+- **Storage**: `~/.deepagents/{agent}/checkpoints.db` (SQLite)
+- **Owned by**: `SqliteSaver` (CLI) or server's checkpointer
+- **Contains**: Message history, agent state per thread
+- **Scope**: Per conversation thread
+
+**Layer 2: Cross-Thread File Storage** (/memories/)
+- **Storage**: `~/.deepagents/{agent}/` (filesystem)
+- **Owned by**: `FilesystemBackend` routed via `CompositeBackend`
+- **Contains**: agent.md, memory files, persistent documents
+- **Scope**: Shared across all threads for one agent
+
+**Layer 3: Programmatic Store** (Long-term Memory)
+- **Storage**: PostgreSQL database (`deepagents` db)
+- **Owned by**: `PostgresStore`
+- **Contains**: Structured data for cross-agent/cross-session memory
+- **Scope**: Global, all agents share (currently underutilized)
+
+**The Routing** (`agent.py:194-206`):
+```python
+# Long-term backend rooted at agent directory
+long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
+
+# Composite backend routes /memories/ to agent dir, rest to CWD
+backend = CompositeBackend(
+    default=FilesystemBackend(),  # Current working directory
+    routes={"/memories/": long_term_backend}  # Agent's persistent storage
+)
+```
+
+**Key Insight**: `/memories/` is a virtual path. When the agent calls `read_file("/memories/guide.md")`, it actually reads `~/.deepagents/{agent}/guide.md`.
+
+### Middleware Stack Order
+
+**Location**: `agent.py:204-307` (custom middleware) and `deepagents/graph.py` (base middleware)
+
+**Critical**: Middleware order matters because each wraps the next in the chain.
+
+**Order** (inside-out):
+1. `TodoListMiddleware` - Adds write_todos tool
+2. `FilesystemMiddleware` - Adds file operation tools
+3. `SubAgentMiddleware` - Adds task tool
+4. `SummarizationMiddleware` - Handles long conversations
+5. `AnthropicPromptCachingMiddleware` - Enables caching
+6. `PatchToolCallsMiddleware` - Fixes tool formatting
+7. **Custom**: `AgentMemoryMiddleware` - Loads agent.md into system prompt
+8. **Custom**: `ResumableShellToolMiddleware` - Adds shell tool
+9. `HumanInTheLoopMiddleware` - HITL approvals (MUST BE LAST)
+
+**Why HITL Must Be Last**: It needs to intercept tool calls AFTER all other middleware has processed them, so it sees the final tool call format.
+
+**Critical Code Pattern** (`agent.py:292-307`):
+```python
+return create_deep_agent(
+    model=model,
+    system_prompt=system_prompt,
+    tools=tools,
+    backend=backend,
+    middleware=agent_middleware,  # ← Our custom middleware goes here
+    checkpointer=checkpointer,
+    store=store,
+    interrupt_on={...},  # ← HITL config (applied as final middleware)
+)
+```
+
+### Thread Management Architecture
+
+**The Three Systems That Must Stay in Sync**:
+
+1. **Metadata** (`threads.json` via `ThreadStore`)
+   - Owned by: `ThreadManager`
+   - Contains: Thread names, timestamps, parent relationships, token counts
+   - File: `~/.deepagents/{agent}/threads.json`
+
+2. **Checkpoint Data** (conversation state)
+   - Owned by: `SqliteSaver` (CLI) or LangGraph server
+   - Contains: Message history, agent state
+   - File: `~/.deepagents/{agent}/checkpoints.db` (CLI only)
+
+3. **Server State** (when using LangGraph server)
+   - Owned by: LangGraph server API
+   - Contains: Server-managed threads
+   - Accessed via: `/threads` API endpoints
+
+**Reconciliation** (`thread_manager.py:460-542`):
+- `reconcile_with_checkpointer()` syncs metadata with checkpoint reality
+- Removes metadata for deleted checkpoints (with grace period)
+- Adds metadata for orphaned checkpoints
+
+**Critical**: When creating or forking threads, both local metadata AND server state must be updated:
+
+```python
+def create_thread(self, name: str | None = None) -> str:
+    # 1. Create on server FIRST
+    thread_id = create_thread_on_server(name=name)
+
+    # 2. Then update local metadata
+    with self.store.edit() as data:
+        data.threads.append(metadata)
+        data.current_thread_id = thread_id
+```
+
+### Human-in-the-Loop (HITL) System
+
+**Architecture** (`agent.py:263-306` + `execution.py:40-156`):
+
+1. **Config** (agent.py): Define which tools require approval and how to format them
+   ```python
+   interrupt_on={
+       "shell": shell_interrupt_config,
+       "write_file": write_file_interrupt_config,
+       # ... more tools
+   }
+   ```
+
+2. **Detection** (execution.py): Detect interrupts in updates stream
+   ```python
+   if "__interrupt__" in data:
+       hitl_request = interrupt_data[0].value
+       interrupt_occurred = True
+   ```
+
+3. **Approval UI** (execution.py:40-156): Arrow-key selector with preview
+   - Shows custom-formatted description
+   - For file operations: shows diff preview
+   - User selects approve/reject with arrow keys or A/R keys
+
+4. **Resumption** (execution.py:544-560): Resume agent with decision
+   ```python
+   stream_input = Command(resume=hitl_response)
+   # Loop continues, restreaming from interrupt point
+   ```
+
+**Auto-Approve Mode**: Bypasses approval UI, auto-accepts all (session_state.auto_approve)
+
+### File Operation Tracking
+
+**Purpose**: Correlate tool calls with results, compute diffs, track metrics for display.
+
+**Flow** (`file_ops.py` + `execution.py:222-365`):
+
+1. **Start** (when tool call is displayed):
+   ```python
+   file_op_tracker.start_operation(buffer_name, parsed_args, buffer_id)
+   # Captures "before" state if write/edit
+   ```
+
+2. **Complete** (when ToolMessage arrives):
+   ```python
+   record = file_op_tracker.complete_with_message(message)
+   # Captures "after" state, computes diff, metrics
+   ```
+
+3. **Render** (if record complete):
+   ```python
+   render_file_operation(record)  # Shows concise summary + diff
+   ```
+
+**Key Insight**: Tracking happens DURING streaming, not after. The tracker correlates async tool calls with their eventual results.
+
+### Server-CLI Communication
+
+**Server API** (`server_client.py`):
+- `is_server_available()` - Health check
+- `create_thread_on_server()` - Create thread via API
+- `fork_thread_on_server()` - Fork existing thread
+- `get_thread_data()` - Fetch thread state/messages
+- `start_server_if_needed()` - Auto-start server
+
+**Integration Points**:
+1. **Thread creation** - Always creates via server API when server available
+2. **Thread metadata** - Enriches local metadata with server data (/threads command)
+3. **Fallback** - CLI works without server, but thread features are limited
+
+**Critical**: Server URLs are configurable via `LANGGRAPH_SERVER_URL` env var (default: `http://127.0.0.1:2024`)
+
+### Input System Architecture
+
+**Location**: `input.py`
+
+**Components**:
+1. **FilePathCompleter** - Activates on `@` prefix, provides path autocomplete
+2. **CommandCompleter** - Activates on `/` prefix, provides slash command autocomplete
+3. **Key Bindings**:
+   - `Enter` - Submit (or apply completion if menu active)
+   - `Alt+Enter` (ESC+Enter) - Insert newline
+   - `Ctrl+E` - Open in external editor (nano)
+   - `Ctrl+T` - Toggle auto-approve mode
+   - `Backspace` - Retrigger completion if in @ or / context
+
+**File Mention Parsing** (`input.py:100-124`):
+- Pattern: `@file/path` (supports escaped spaces: `@file\ with\ spaces.txt`)
+- Resolves relative to CWD
+- Injects file contents into prompt automatically
+
+**Bottom Toolbar** (`input.py:127-159`):
+- Shows auto-approve status (color-coded)
+- Shows "BASH MODE" when input starts with `!`
+- Updates reactively when Ctrl+T pressed
+
+---
+
+## Critical Patterns and Conventions
+
+### Pattern: Direct Object Construction for Long-Running Apps
+
+**Anti-Pattern** (Don't Do This):
+```python
+# Context manager pattern is for scripts, NOT long-running apps
+checkpointer = SqliteSaver.from_conn_string(db_path)  # Returns Iterator!
+store = PostgresStore.from_conn_string(db_uri)        # Returns Iterator!
+```
+
+**Correct Pattern** (Do This):
+```python
+# Direct construction for CLI/server
+import sqlite3
+conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
+checkpointer = SqliteSaver(conn)
+checkpointer.setup()  # Initialize schema
+
+import psycopg
+pg_conn = psycopg.connect(database_url, autocommit=True)
+store = PostgresStore(pg_conn)
+store.setup()  # Initialize schema
+```
+
+**Why**: `from_conn_string()` returns a context manager (Iterator) designed for short-lived scripts. Long-running apps need direct connections.
+
+### Pattern: Absolute Imports in graph.py
+
+**Critical Rule**: `graph.py` MUST use absolute imports, not relative.
+
+**Why**: LangGraph's module loader executes `graph.py` outside of package context, so relative imports fail.
 
 ```python
 # ✅ CORRECT
 from deepagents_cli.agent import create_agent_with_config
 from deepagents_cli.tools import http_request, web_search
 
-# ❌ WRONG - will break LangGraph server
+# ❌ WRONG - will break server
 from .agent import create_agent_with_config
 from .tools import http_request, web_search
 ```
 
-**Reason**: LangGraph's module loader executes `graph.py` outside package context, so relative imports fail with "attempted relative import with no known parent package".
+### Pattern: Rich Console Singleton
 
-### 3. Persistence Architecture
+**Location**: `config.py:59`
 
-The agent uses a **three-layer persistence system**:
-
-#### A. Thread-level Checkpointing (Conversation Memory)
-- **Storage**: SQLite at `~/.deepagents/{agent_name}/checkpoints.db`
-- **Implementation**: `SqliteSaver` from `langgraph.checkpoint.sqlite`
-- **Purpose**: Preserves conversation state, allows resuming threads
-- **Scope**: Per-thread (each conversation has a unique thread_id)
-
-#### B. File System Backend (Cross-thread Memory Files)
-- **Storage**: `~/.deepagents/{agent_name}/` directory
-- **Implementation**: `CompositeBackend` with two routes:
-  - **Default**: `FilesystemBackend()` - operates in current working directory
-  - **/memories/**: `FilesystemBackend(root_dir=agent_dir)` - persistent agent memories
-- **Purpose**: Agent saves/reads files in `/memories/` that persist across sessions
-- **Example**: `write_file /memories/guide.md`, `read_file /memories/preferences.json`
-
-#### C. Long-term Store (Cross-agent Knowledge - Currently Unused)
-- **Storage**: PostgreSQL database via `DEEPAGENTS_DATABASE_URL`
-- **Implementation**: `PostgresStore` from `langgraph.store.postgres`
-- **Status**: Infrastructure ready but not actively used
-- **Future**: For multi-customer deployment, switch from FilesystemBackend to StoreBackend
-
-**Key Understanding**: Current setup uses FilesystemBackend (disk) for cross-thread persistence, which works perfectly for local/personal use.
-
-### 4. Environment Configuration
-
-**Location**: `.env` file in project root (NOT `~/.zshrc`)
-
-**Required Variables**:
-```bash
-# API Keys
-ANTHROPIC_API_KEY=sk-ant-api03-...
-TAVILY_API_KEY=tvly-dev-...  # Optional - for web search
-
-# LangSmith Tracing (free for local dev server)
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=lsv2_pt_...
-LANGCHAIN_PROJECT=deepagents-cli
-
-# PostgreSQL (optional - defaults to localhost)
-DEEPAGENTS_DATABASE_URL=postgresql://localhost/deepagents
-```
-
-**Why .env**: Better portability, LangGraph server compatibility, cleaner separation.
-
-### 5. Checkpoint/Store Initialization Pattern
-
-**CRITICAL**: For long-running applications (CLI/server), use direct construction:
+**Rule**: Always use the singleton console instance, never create new ones.
 
 ```python
-# Checkpointer
-import sqlite3
-conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
-checkpointer = SqliteSaver(conn)
-checkpointer.setup()
+# ✅ CORRECT
+from .config import console
+console.print("Hello")
 
-# Store
-import psycopg
-pg_conn = psycopg.connect(database_url, autocommit=True)
-store = PostgresStore(pg_conn)
-store.setup()
+# ❌ WRONG - creates separate console, breaks rendering
+from rich.console import Console
+Console().print("Hello")
 ```
 
-**NEVER use** `from_conn_string()` which returns a context manager:
+**Why**: Multiple consoles interfere with spinner/status rendering, terminal state.
+
+### Pattern: Tool Argument Formatting
+
+**Location**: `ui.py:25-145`
+
+**Rule**: Show users the MOST RELEVANT info, not all arguments.
+
 ```python
-# ❌ WRONG - returns Iterator/context manager
-checkpointer = SqliteSaver.from_conn_string(...)
+# read_file(file_path="/very/long/path/to/file.py", offset=100, limit=50)
+# Displays as:
+# read_file(file.py)  ← Just the filename
+
+# web_search(query="how to use langgraph", max_results=5)
+# Displays as:
+# web_search("how to use langgraph")  ← Just the query
 ```
 
-Context managers are only for short-lived scripts.
+**Implementation**: `format_tool_display()` has custom logic per tool type.
 
-### 6. Checkpoint Time-to-Live (TTL) Configuration
+### Pattern: Thread State Updates
 
-**Purpose**: Automatically clean up old checkpoints to prevent unbounded database growth.
+**Rule**: Always update BOTH timestamp and current_thread_id when switching threads.
 
-**Configuration Location**: `langgraph.json`
-
-**Current Settings** (as of 2025-01-03):
-```json
-{
-  "checkpointer": {
-    "ttl": {
-      "strategy": "delete",
-      "sweep_interval_minutes": 120,
-      "default_ttl": 20160
-    }
-  },
-  "store": {
-    "ttl": {
-      "refresh_on_read": true,
-      "sweep_interval_minutes": 120,
-      "default_ttl": 20160
-    }
-  }
-}
-```
-
-**Settings Explanation**:
-- `default_ttl: 20160` = 14 days (in minutes)
-- `sweep_interval_minutes: 120` = Check for expired data every 2 hours
-- `strategy: "delete"` = Only available strategy (deletes all checkpoints in expired threads)
-- `refresh_on_read: true` = Accessing store items resets their expiration timer
-
-**CRITICAL: TTL Only Works in Server Mode** 🚨
-
-**Automatic TTL cleanup requires running LangGraph server:**
-- ✅ **Server mode** (`langgraph dev` or `./start-dev.sh`): TTL cleanup runs every 2 hours in background
-- ❌ **CLI-only mode** (`deepagents`): TTL cleanup does **NOT** run automatically
-
-**Why**: TTL sweep is a background process in LangGraph Server. The standalone CLI doesn't run this background task.
-
-**Recommendation**:
-- For **development with automatic cleanup**: Use `./start-dev.sh` (server + CLI)
-- For **CLI-only usage**: Use `/threads` + `/new` to manage conversations until manual cleanup feature is restored (see Issue #15)
-
-**Important Limitations**:
-- TTL **only affects NEW data** created after the configuration is deployed
-- Existing threads/checkpoints are NOT retroactively affected
-- Requires server restart (`langgraph dev`) to take effect
-- Thread-level deletion (all checkpoints in a thread deleted together, not individual checkpoints)
-
-**Current Thread Management**:
-
-The CLI provides an interactive picker for thread management:
-
-```bash
-# Interactive picker to view and switch threads
-/threads
-
-# Create new thread
-/new [name]
-```
-
-**Note**: Manual cleanup commands (`delete`, `vacuum`, `stats`, `sync`) were removed to simplify the CLI. They will be restored in a future update (tracked in Issue #15) to provide CLI-only users with thread maintenance capabilities when the LangGraph server is offline.
-
-**ThreadManager Methods** (programmatic access still available):
 ```python
-# These methods remain available for programmatic use, though CLI commands are being redesigned
-
-# Delete specific thread
-thread_manager.delete_thread(thread_id, agent)
-
-# Bulk cleanup with preview
-count, names = thread_manager.cleanup_old_threads(days_old=30, agent, dry_run=True)
-count, names = thread_manager.cleanup_old_threads(days_old=30, agent, dry_run=False)
-
-# Vacuum database
-result = thread_manager.vacuum_database()
-# Returns: {'size_before': bytes, 'size_after': bytes}
-
-# Get statistics
-stats = thread_manager.get_database_stats()
-# Returns: {thread_count, checkpoint_count, db_size_bytes, oldest_thread, newest_thread}
+# ✅ CORRECT
+with self.store.edit() as data:
+    thread["last_used"] = now          # Update timestamp
+    data.current_thread_id = thread_id # Update current
 ```
 
-**Best Practices**:
-- **CLI-only users**: Use `/threads` to view threads and `/new` to start fresh conversations; run server mode periodically to enable automatic TTL cleanup
-- **Server users**: TTL runs automatically every 2 hours
-- Consider longer TTL for important conversations (14-90 days)
-- Document TTL policy for users (data retention period)
-
-**Reference**: https://docs.langchain.com/langsmith/configure-ttl
+**Why**: Ensures thread sorting and TTL cleanup work correctly.
 
 ---
 
-## File Structure & Key Components
+## Common Gotchas and Pitfalls
 
-```
-deepagents-cli/
-├── .env                          # Environment variables (gitignored)
-├── langgraph.json               # LangGraph server config
-├── Makefile                     # Development commands
-├── pyproject.toml               # Dependencies & build config
-├── start-dev-server.sh          # Launch server only
-├── start-dev.sh                 # Launch server + CLI
-├── start-tmux.sh                # Launch in tmux split
-│
-├── deepagents_cli/
-│   ├── agent.py                 # ⭐ CORE: Agent creation & config
-│   │   └── create_agent_with_config()  # Shared by CLI & server
-│   │   └── get_system_prompt()         # Base system prompt
-│   │   └── list_agents()               # Agent management
-│   │   └── reset_agent()               # Agent reset/copy
-│   │
-│   ├── graph.py                 # ⭐ CRITICAL: Server export
-│   │   └── graph                       # Module-level variable
-│   │   └── _get_default_model()
-│   │   └── _get_default_tools()
-│   │
-│   ├── tools.py                 # Tool definitions
-│   │   └── http_request()              # HTTP tool
-│   │   └── web_search()                # Tavily search
-│   │
-│   ├── main.py                  # ⭐ CLI entry point & loop
-│   │   └── simple_cli()                # Interactive loop
-│   │   └── check_cli_dependencies()
-│   │
-│   ├── cli.py                   # Stub (unused, just prints "I'm alive!")
-│   │
-│   ├── execution.py             # Task execution
-│   │   └── execute_task()              # Runs agent
-│   │
-│   ├── agent_memory.py          # Memory middleware
-│   │   └── AgentMemoryMiddleware
-│   │
-│   ├── resumable_shell_async.py # Async shell execution
-│   │   └── ResumableShellToolMiddleware
-│   │
-│   ├── config.py                # Configuration & styling
-│   │   └── create_model()              # ChatAnthropic instance
-│   │   └── SessionState                # Session state
-│   │   └── console                     # Rich Console singleton
-│   │
-│   ├── ui.py                    # UI rendering & token tracking
-│   ├── input.py                 # Prompt session (prompt_toolkit)
-│   ├── commands.py              # Slash command handlers
-│   ├── file_ops.py              # File operation utilities
-│   ├── token_utils.py           # Token counting
-│   └── thread_manager.py        # Thread management
-│
-└── tests/
-    ├── test_file_ops.py
-    └── test_placeholder.py
-```
+### Gotcha: Forgetting to Flush Text Buffer
 
-### Key File Responsibilities
+**Location**: `execution.py:231-244`
 
-| File | Purpose | Critical Notes |
-|------|---------|----------------|
-| `agent.py` | Agent creation logic | Shared by CLI & server |
-| `graph.py` | LangGraph server export | MUST use absolute imports |
-| `main.py` | CLI implementation | Actual entry point |
-| `cli.py` | Console script stub | Placeholder only |
-| `execution.py` | Task execution | Contains streaming logic |
-| `config.py` | Configuration | Console singleton at line 76 |
+**Problem**: AI text accumulates in `pending_text` buffer, must be flushed before showing tool calls or diffs.
 
----
+**Solution**: Always call `flush_text_buffer(final=True)` before rendering non-text content:
 
-## System Prompt Structure
-
-The final system prompt is composed of:
-
-1. **Base System Prompt** (`agent.py:get_system_prompt()`):
-   - Current working directory info
-   - Memory system usage (`/memories/`)
-   - Human-in-the-loop guidelines
-   - Web search tool instructions
-   - Todo list management
-
-2. **Agent-Specific Prompt** (`~/.deepagents/{agent_name}/agent.md`):
-   - Custom instructions per agent
-   - Defaults to `config.get_default_coding_instructions()` if missing
-
-3. **Deep Agent Base Prompt** (from `deepagents` library):
-   - Standard Deep Agent instructions
-   - Added automatically by `create_deep_agent()`
-
----
-
-## Middleware Stack
-
-**Order matters!** Middleware is applied in this exact order:
-
-### From create_deep_agent() (libs/deepagents/graph.py):
-1. `TodoListMiddleware()` - Provides write_todos tool
-2. `FilesystemMiddleware(backend=backend)` - File operations
-3. `SubAgentMiddleware(...)` - Task tool (spawn subagents)
-4. `SummarizationMiddleware(...)` - Conversation summarization
-5. `AnthropicPromptCachingMiddleware(...)` - Prompt caching
-6. `PatchToolCallsMiddleware()` - Tool call formatting fixes
-7. **Custom middleware** (passed via parameter)
-8. `HumanInTheLoopMiddleware(interrupt_on=...)` - HITL approvals
-
-### Custom Middleware (from agent.py):
-1. `AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/")`
-2. `ResumableShellToolMiddleware(workspace_root=os.getcwd(), ...)`
-
----
-
-## Human-in-the-Loop (HITL) Configuration
-
-**Location**: `agent.py:create_agent_with_config()` ~line 254-296
-
-**Tools requiring approval**:
-1. `shell` - Shell command execution
-2. `write_file` - File writing/overwriting
-3. `edit_file` - File editing
-4. `web_search` - Web search (uses API credits)
-5. `task` - Subagent spawning
-
-Each has a custom formatting function showing relevant details.
-
-**Auto-Approve Mode**: `deepagents --auto-approve` disables HITL.
-
----
-
-## Thread Management
-
-**Location**: `thread_manager.py` + `execution.py`
-
-**Current Implementation**:
 ```python
-thread_id = assistant_id or "main"
-if session_state and session_state.thread_manager:
-    thread_id = session_state.thread_manager.get_current_thread_id()
+# Before showing tool calls
+flush_text_buffer(final=True)
+console.print(f"  {icon} {display_str}")
 
-config = {"configurable": {"thread_id": thread_id}}
+# Before showing diffs
+flush_text_buffer(final=True)
+render_file_operation(record)
 ```
 
-**Features**:
-- Pure UUID format (LangGraph standard)
-- Thread metadata stored in `~/.deepagents/{agent_name}/threads.json`
-- Conversations persist across CLI sessions
+### Gotcha: Tool Call Deduplication
 
-**Thread Commands**:
-- `/new [name]` - Create new thread
-- `/threads` - Interactive picker to list and switch threads
+**Location**: `execution.py:224-492`
 
----
+**Problem**: Same tool call can appear multiple times in chunks.
 
-## Git Workflow
+**Solution**: Track displayed IDs to prevent duplicates:
 
-**Repository**: https://github.com/ASTXRTYS/DEEP-AI (fork of langchain-ai/deepagents)
-
-### Remote Configuration
-```bash
-origin   → https://github.com/langchain-ai/deepagents.git  # LangChain upstream
-upstream → git@github.com:ASTXRTYS/DEEP-AI.git             # Your repo
-```
-
-### Sync with LangChain Upstream
-```bash
-cd /Users/Jason/astxrtys/DevTools/deepagents
-
-# Fetch latest from LangChain
-git fetch origin
-
-# Merge into your master
-git checkout master
-git merge origin/master
-
-# Push to your repo
-git push upstream master
-```
-
-### Feature Branch Workflow
-```bash
-# Create feature branch
-git checkout -b feature/my-feature
-
-# Make changes, commit
-git add .
-git commit -m "Implement feature"
-
-# Push to your repo
-git push upstream feature/my-feature
-
-# Merge when ready
-git checkout master
-git merge feature/my-feature
-git push upstream master
-```
-
----
-
-## Known Issues & Solutions
-
-### Issue 1: Relative Import Error in graph.py
-**Error**: `ImportError: attempted relative import with no known parent package`
-
-**Solution**: Use absolute imports in `graph.py`
 ```python
-from deepagents_cli.agent import create_agent_with_config  # ✅
-from .agent import create_agent_with_config  # ❌
+displayed_tool_ids = set()
+
+if buffer_id in displayed_tool_ids:
+    continue  # Already shown
+
+displayed_tool_ids.add(buffer_id)  # Mark as shown
 ```
 
-### Issue 2: Missing Dependencies
-**Error**: `ModuleNotFoundError: No module named 'langchain_anthropic'`
+### Gotcha: Server vs CLI Persistence Confusion
 
-**Solution**: Reinstall
-```bash
-cd /Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents-cli
-python3.11 -m pip install -e . --break-system-packages
-```
+**Problem**: Expecting CLI checkpointer to work with server mode, or vice versa.
 
-### Issue 3: PostgreSQL Connection Error
-**Error**: `could not connect to server` or `database "deepagents" does not exist`
+**Reality**: They use DIFFERENT persistence:
+- CLI: Local SQLite (`checkpoints.db`)
+- Server: Server-managed (API-based)
 
-**Solution**:
-```bash
-# Start PostgreSQL
-brew services start postgresql@14
+**Implication**: Threads created in CLI won't appear in server UI unless server is running during creation.
 
-# Create database
-/opt/homebrew/opt/postgresql@14/bin/createdb deepagents
-```
+### Gotcha: Modifying checkpointer After Creation
 
-### Issue 4: Server Won't Start
-**Check**:
-```bash
-# Verify .env exists
-cat .env
-
-# Check logs
-langgraph dev  # See full error output
-```
-
----
-
-## Dependencies
-
-**Core Dependencies** (from `pyproject.toml`):
-- `deepagents==0.2.4` - Core library (workspace dependency)
-- `langchain-anthropic>=0.1.0` - Anthropic integration
-- `langchain-community>=0.1.0` - Community integrations
-- `langchain-openai>=0.1.0` - OpenAI integration
-- `langgraph-checkpoint-sqlite>=3.0.0` - SQLite checkpointing
-- `langgraph-checkpoint-postgres>=3.0.0` - PostgreSQL checkpointing
-- `psycopg[binary,pool]>=3.0.0` - PostgreSQL driver
-- `tavily-python` - Web search
-- `rich>=13.0.0` - Terminal UI
-- `prompt-toolkit>=3.0.52` - Interactive input
-- `python-dotenv` - Environment variable loading
-- `requests` - HTTP client
-
-**Dev Dependencies**:
-- `pytest` + ecosystem (pytest-asyncio, pytest-cov, pytest-mock, etc.)
-- `ruff` - Linting and formatting
-- `mypy` - Type checking
-
----
-
-## Model Configuration
-
-**Model**: `claude-sonnet-4-5-20250929`
-
-### Server (graph.py)
+**Anti-Pattern**:
 ```python
-ChatAnthropic(
-    model="claude-sonnet-4-5-20250929",
-    max_tokens=8000,
-    temperature=0,
-    timeout=60,
-    max_retries=2,
-)
+# This is what the broken /clear command did:
+agent.checkpointer = InMemorySaver()  # ❌ DESTROYS PERSISTENCE
 ```
 
-### CLI (config.py - create_model())
-- Same model configuration
-- API key loaded from environment
-- Includes validation
-
----
-
-## Testing Checklist
-
-Before committing changes:
-
-- [ ] Tests pass: `make test`
-- [ ] Code formatted: `make format`
-- [ ] Code linted: `make lint`
-- [ ] LangGraph server starts: `langgraph dev`
-- [ ] Server registers graph (look for "Registering graph with id 'agent'")
-- [ ] CLI starts: `deepagents`
-- [ ] Both server and CLI execute tasks
-- [ ] Memory persists across sessions
-- [ ] HITL prompts work
-- [ ] Web search works (if TAVILY_API_KEY set)
-- [ ] File operations work in CWD and /memories/
-- [ ] Auto-approve mode works: `deepagents --auto-approve`
-- [ ] Thread commands work: `/new`, `/threads`
-
----
-
-## Quick Reference
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| Agent creation | `agent.py:create_agent_with_config()` | Shared logic |
-| Server export | `graph.py:graph` | Module-level variable |
-| Tools | `tools.py` | http_request, web_search |
-| Environment | `.env` | API keys, config |
-| Server config | `langgraph.json` | Points to graph.py |
-| CLI entry | `main.py:simple_cli()` | Interactive loop |
-| Execution | `execution.py:execute_task()` | Task runner |
-| Checkpoints | `~/.deepagents/{agent}/checkpoints.db` | SQLite |
-| Threads | `~/.deepagents/{agent}/threads.json` | Metadata |
-| Memory files | `~/.deepagents/{agent}/` | Via /memories/ |
-
----
-
-## Important Implementation Notes
-
-### 1. create_deep_agent() Signature
-**Location**: `/Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents/graph.py:40`
-
-**Key Parameters**:
-- `store: BaseStore | None = None` - Enables long-term memory (NOT `use_longterm_memory`)
-- `backend: BackendProtocol | BackendFactory | None = None` - File operations backend
-- `checkpointer: Checkpointer | None = None` - Conversation state persistence
-- `middleware: Sequence[AgentMiddleware] = ()` - Custom middleware
-- `interrupt_on: dict[str, bool | InterruptOnConfig] | None = None` - HITL config
-
-### 2. Agent Storage Locations
-- **Checkpoints**: `~/.deepagents/{agent_name}/checkpoints.db`
-- **Thread Metadata**: `~/.deepagents/{agent_name}/threads.json`
-- **Agent Prompt**: `~/.deepagents/{agent_name}/agent.md`
-- **Memory Files**: `~/.deepagents/{agent_name}/*` (accessed via `/memories/` prefix)
-
-### 3. CompositeBackend Routes
+**Correct Approach**:
 ```python
-backend = CompositeBackend(
-    default=FilesystemBackend(),  # CWD
-    routes={
-        "/memories/": FilesystemBackend(root_dir=agent_dir)  # Persistent
-    }
-)
+# Create new thread instead
+thread_manager.create_thread(name="New conversation")
+thread_manager.switch_thread(new_thread_id)
 ```
 
-**Usage**:
-- `ls /memories/` - List persistent files
-- `read_file /memories/guide.md` - Read from agent storage
-- `write_file /memories/note.txt` - Write to agent storage
-- `ls` - List CWD files
-- `read_file main.py` - Read from CWD
+**Why**: Replacing the checkpointer breaks all existing threads and their history.
+
+### Gotcha: Async Event Loop Conflicts
+
+**Location**: `commands.py:416-429`
+
+**Problem**: Can't use `asyncio.run()` from inside a running event loop.
+
+**Solution**: Check for existing loop and handle appropriately:
+
+```python
+try:
+    loop = asyncio.get_running_loop()
+    # Already in loop - run in thread pool
+    with ThreadPoolExecutor() as executor:
+        return executor.submit(asyncio.run, async_function()).result()
+except RuntimeError:
+    # No loop - safe to use asyncio.run()
+    return asyncio.run(async_function())
+```
 
 ---
 
-## LangGraph Studio
+## Key Files Reference
 
-**Free visual debugging** for local dev server:
+**Core Agent Logic**:
+- `agent.py` - Agent creation, system prompts, HITL config (SHARED by CLI and server)
+- `graph.py` - Server export (absolute imports only)
+- `execution.py` - Dual-mode streaming, tool buffering, HITL flow
 
-1. Start server: `./start-dev-server.sh`
-2. Open: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-3. Features:
-   - Visual graph execution
-   - Step-by-step debugging
-   - State inspection
-   - Time travel debugging
+**User Interface**:
+- `ui.py` - Rendering, formatting, token tracking
+- `input.py` - Prompt session, completers, key bindings
+- `commands.py` - Slash command handlers
 
-**LangSmith Tracing**:
-- Enabled: `LANGCHAIN_TRACING_V2=true`
-- Project: `deepagents-cli`
-- Access: https://smith.langchain.com
-- Cost: Free for local dev
+**Persistence**:
+- `thread_manager.py` - Thread lifecycle, metadata management
+- `thread_store.py` - Atomic JSON file operations (used by ThreadManager)
+- `agent_memory.py` - Memory middleware, loads agent.md
 
----
+**Server Integration**:
+- `server_client.py` - LangGraph API client
+- `main.py` - CLI entry point, server detection
 
-## Key Takeaways
+**Tools & Operations**:
+- `tools.py` - http_request, web_search definitions
+- `file_ops.py` - File operation tracking, diff computation
 
-1. **Never use relative imports in graph.py** - Always absolute
-2. **create_deep_agent() has NO use_longterm_memory parameter** - Use `store=`
-3. **CLI and server MUST share create_agent_with_config()** - Consistency
-4. **Environment in .env, not .zshrc** - Portability
-5. **PostgreSQL for store (unused), SQLite for checkpointing** - Different purposes
-6. **Memory system has two parts**: Checkpointing + FilesystemBackend
-7. **/memories/ is virtual path** to `~/.deepagents/{agent_name}/`
-8. **Server auto-reloads, CLI doesn't** - Restart CLI for changes
-9. **Studio UI is free** for local server
-10. **Current persistence setup perfect for local use** - FilesystemBackend works great
+**Configuration**:
+- `config.py` - Constants, colors, model creation, SessionState
+- `.env` - API keys, database URLs (NOT in repo)
+- `langgraph.json` - Server configuration
 
 ---
 
-**Last Updated**: 2025-11-03
-**By**: Claude Code (claude.ai/code)
+## Environment Variables
+
+Required in `.env`:
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...     # Claude API key
+TAVILY_API_KEY=tvly-dev-...            # Optional - web search
+LANGCHAIN_TRACING_V2=true              # LangSmith tracing
+LANGCHAIN_API_KEY=lsv2_pt_...          # LangSmith API
+LANGCHAIN_PROJECT=deepagents-cli       # LangSmith project
+DEEPAGENTS_DATABASE_URL=postgresql://localhost/deepagents  # Optional - store
+```
+
+Optional:
+```bash
+LANGGRAPH_SERVER_URL=http://127.0.0.1:2024  # Server URL (default shown)
+LANGGRAPH_SERVER_TIMEOUT=5.0                 # Server request timeout (seconds)
+OPENAI_API_KEY=sk-...                        # Alternative to Anthropic
+OPENAI_MODEL=gpt-5-mini                      # If using OpenAI
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929   # Override default Claude model
+EDITOR=nano                                   # External editor (default: nano)
+```
+
+---
+
+## Testing & Debugging
+
+### Manual Testing Checklist
+
+After making changes, verify:
+
+- [ ] CLI starts without errors: `deepagents`
+- [ ] Server starts and registers graph: `langgraph dev`
+- [ ] Both can execute tasks (try a simple prompt)
+- [ ] HITL prompts work (try `shell ls`)
+- [ ] File operations work: `read_file`, `write_file`, `edit_file`
+- [ ] `/memories/` path works: `ls /memories/`
+- [ ] Thread commands: `/new`, `/threads`
+- [ ] Token tracking: `/tokens`
+- [ ] Auto-approve toggle: `Ctrl+T`
+- [ ] File mentions: `@README.md what does this file explain?`
+- [ ] Slash commands: `/help`, `/clear`
+
+### Debugging Tips
+
+**Agent not responding**:
+- Check `.env` has `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+- Check API key is valid (try in another context)
+- Look for network errors in console output
+
+**Server won't start**:
+- Check port 2024 is available: `lsof -i :2024`
+- Verify `.env` exists and is readable
+- Check for import errors: `python -c "from deepagents_cli.graph import graph"`
+
+**Persistence issues**:
+- Check `~/.deepagents/{agent}/` directory exists
+- Verify `checkpoints.db` has content: `sqlite3 ~/.deepagents/agent/checkpoints.db ".tables"`
+- Check PostgreSQL is running: `brew services list | grep postgresql`
+
+**Thread confusion**:
+- Run reconciliation: Check `thread_manager.reconcile_with_checkpointer()`
+- Verify threads.json is valid JSON
+- Look for thread_id mismatches in logs
+
+---
+
+## Design Principles
+
+1. **Simplicity**: Prefer straightforward implementations over clever abstractions
+2. **Observability**: All important actions should be visible in the UI
+3. **Fault Tolerance**: Gracefully handle missing files, network errors, corrupt data
+4. **User Control**: HITL for potentially destructive operations (unless auto-approve)
+5. **Performance**: Async I/O, concurrent API calls (LangSmith metrics), caching where appropriate
+6. **Compatibility**: Same agent code runs in CLI and server contexts
+
+---
+
+## Future Considerations
+
+**When Adding New Tools**:
+1. Add to `tools.py` with docstring
+2. Update `_get_default_tools()` in both `main.py` and `graph.py`
+3. Add HITL config in `agent.py` if tool is destructive
+4. Add custom formatting in `ui.py:format_tool_display()`
+5. Add icon in `execution.py:tool_icons` dict
+
+**When Adding New Middleware**:
+1. Consider ORDER in middleware stack
+2. Test with both CLI and server modes
+3. Document any state additions
+4. Verify HITL still works (middleware order matters)
+
+**When Modifying Persistence**:
+1. Consider migration path for existing users
+2. Test thread reconciliation
+3. Update backup/restore logic if applicable
+4. Document database schema changes
+
+**When Changing Streaming Logic**:
+1. Test HITL flow thoroughly (easy to break)
+2. Verify tool call buffering still works
+3. Check spinner/status updates still render
+4. Ensure text buffer flushing happens correctly
+
+---
+
+## Summary
+
+This CLI is built around a **dual-mode streaming pattern** that handles both content and interrupts, with **three-layer persistence** (checkpoints, filesystem, store), a **carefully ordered middleware stack**, and **two deployment modes** (CLI and server) using the same core agent code. Understanding the **tool call buffering**, **HITL interrupt flow**, and **thread management synchronization** is critical to working effectively with this codebase.

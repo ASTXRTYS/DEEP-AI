@@ -6,7 +6,7 @@ AI coding assistant powered by Claude Sonnet 4.5 with persistent memory, file op
 
 ### 1. Install
 ```bash
-cd /Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents-cli
+cd libs/deepagents-cli
 python3.11 -m pip install -e . --break-system-packages
 ```
 
@@ -37,32 +37,20 @@ brew services start postgresql@14
 
 ### 4. Run
 
-#### Option A: CLI Only
+Start the LangGraph dev server first (terminal 1):
+
+```bash
+cd libs/deepagents-cli
+langgraph dev
+```
+
+Then, in a separate terminal, launch the CLI:
+
 ```bash
 deepagents
 ```
 
-#### Option B: With Studio Debugging
-```bash
-# Terminal 1: Start LangGraph dev server
-./start-dev-server.sh
-
-# Terminal 2: Start CLI
-deepagents
-```
-
-#### Option C: Both Together
-```bash
-# Starts server in background, then CLI
-# Automatically stops server when CLI exits
-./start-dev.sh
-```
-
-#### Option D: Tmux Split Panes
-```bash
-# Server on left, CLI on right
-./start-tmux.sh
-```
+If the CLI cannot reach the server, it will exit with guidance to start it manually—be sure `langgraph dev` is running before launching `deepagents`.
 
 ## Usage
 
@@ -120,7 +108,7 @@ Stored in: `~/.deepagents/{agent_name}/`
 ### Thread Cleanup & Maintenance
 
 **Automatic Cleanup (Server Mode Only)**:
-- When running with LangGraph server (`./start-dev.sh`), threads older than 14 days are automatically deleted
+- When running with LangGraph server (started via `langgraph dev`), threads older than 14 days are automatically deleted
 - Cleanup runs every 2 hours in the background
 - **Note**: Standalone CLI (`deepagents`) does NOT run automatic cleanup
 
@@ -135,7 +123,7 @@ Stored in: `~/.deepagents/{agent_name}/`
 
 Free visual debugging interface:
 
-1. Start server: `./start-dev-server.sh`
+1. Start server: `langgraph dev`
 2. Open: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 3. Execute tasks and see step-by-step execution
 4. Inspect state, time-travel debug
@@ -178,10 +166,6 @@ cd /Users/Jason/astxrtys/DevTools/deepagents/libs/deepagents-cli
 python3.11 -m pip install -e . --break-system-packages
 ```
 
-### Scripts not executable
-```bash
-chmod +x start-dev-server.sh start-dev.sh start-tmux.sh
-```
 
 ## Features
 
@@ -203,9 +187,6 @@ chmod +x start-dev-server.sh start-dev.sh start-tmux.sh
 deepagents-cli/
 ├── .env                          # Environment variables
 ├── langgraph.json               # Server config
-├── start-dev-server.sh          # Launch server only
-├── start-dev.sh                 # Launch server + CLI
-├── start-tmux.sh                # Launch in tmux
 ├── CLAUDE.md                    # Technical docs for AI
 ├── README.md                    # This file
 └── deepagents_cli/

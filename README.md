@@ -25,6 +25,27 @@ uv add deepagents
 poetry add deepagents
 ```
 
+## Running the DeepAgents CLI locally
+
+The DeepAgents CLI expects a LangGraph server to be running for thread management, history, and Studio integration.
+
+1. Make sure you have a `.env` file with the required credentials (for example, `LANGCHAIN_API_KEY`) in `libs/deepagents-cli/`.
+2. Ensure `libs/deepagents-cli/langgraph.json` is present (see `examples/research/langgraph.json` for a template).
+3. Start the LangGraph dev server from that directory:
+
+   ```bash
+   cd libs/deepagents-cli
+   langgraph dev
+   ```
+
+4. In a separate terminal, run the CLI:
+
+   ```bash
+   deepagents
+   ```
+
+If the CLI cannot reach the server it will exit with guidance to start it manually, so always launch `langgraph dev` first when working locally.
+
 ## Usage
 
 (To run the example below, you will need to `pip install tavily-python`).

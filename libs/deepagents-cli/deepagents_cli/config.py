@@ -58,6 +58,12 @@ config = {"recursion_limit": 1000}
 # Rich console instance
 console = Console(highlight=False)
 
+# Server request timeout (seconds)
+try:
+    SERVER_REQUEST_TIMEOUT: float = float(os.getenv("LANGGRAPH_SERVER_TIMEOUT", "5"))
+except ValueError:
+    SERVER_REQUEST_TIMEOUT = 5.0
+
 
 class SessionState:
     """Holds mutable session state (auto-approve mode, thread manager, etc)."""

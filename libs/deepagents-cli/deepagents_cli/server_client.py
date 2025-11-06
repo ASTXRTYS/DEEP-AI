@@ -1,11 +1,94 @@
 """Client for LangGraph dev server API."""
 
+from __future__ import annotations
+
+import atexit
 import os
+import signal
+import socket
 import subprocess
+import tempfile
 import time
 from typing import Any
 
 import requests
+
+from .config import SERVER_REQUEST_TIMEOUT
+
+
+_STARTED_SERVER_PROCESS: subprocess.Popen[bytes] | None = None
+_CLEANUP_REGISTERED = False
+
+
+def _register_server_cleanup(process: subprocess.Popen[bytes]) -> None:
+    """Register an atexit handler to terminate the spawned dev server."""
+
+    global _STARTED_SERVER_PROCESS, _CLEANUP_REGISTERED
+    _STARTED_SERVER_PROCESS = process
+
+    if not _CLEANUP_REGISTERED:
+        atexit.register(_cleanup_started_server)
+        _CLEANUP_REGISTERED = True
+
+
+def _cleanup_started_server() -> None:
+    """Terminate the LangGraph dev server started by the CLI."""
+
+    global _STARTED_SERVER_PROCESS
+
+    process = _STARTED_SERVER_PROCESS
+    if process is None:
+        return
+
+    if process.poll() is None:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGTERM)
+            else:  # pragma: no cover - platform specific
+                process.terminate()
+            process.wait(timeout=5)
+        except Exception:  # pragma: no cover - defensive cleanup
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    _STARTED_SERVER_PROCESS = None
+
+
+def _request(
+    method: str,
+    path: str,
+    *,
+    server_url: str | None = None,
+    timeout: float | None = None,
+    json: Any | None = None,
+) -> requests.Response:
+    """Internal helper for LangGraph requests with consistent handling."""
+
+    url = f"{server_url or get_server_url()}{path}"
+    timeout = timeout or SERVER_REQUEST_TIMEOUT
+
+    try:
+        response = requests.request(method, url, timeout=timeout, json=json)
+        response.raise_for_status()
+        return response
+    except requests.Timeout as exc:
+        raise LangGraphTimeoutError(f"Timed out talking to LangGraph at {url}") from exc
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        raise LangGraphRequestError(str(exc)) from exc
+
+
+class LangGraphError(RuntimeError):
+    """Base error for LangGraph client."""
+
+
+class LangGraphTimeoutError(LangGraphError):
+    """Raised when requests to LangGraph time out."""
+
+
+class LangGraphRequestError(LangGraphError):
+    """Raised for non-timeout request failures."""
 
 
 def get_thread_data(
@@ -21,10 +104,9 @@ def get_thread_data(
         Thread data including messages, or None if server unavailable/error
     """
     try:
-        response = requests.get(f"{server_url}/threads/{thread_id}/state", timeout=2)
-        response.raise_for_status()
+        response = _request("GET", f"/threads/{thread_id}/state", server_url=server_url)
         return response.json()
-    except Exception:
+    except LangGraphError:
         return None
 
 
@@ -38,10 +120,9 @@ def get_all_threads(server_url: str = "http://127.0.0.1:2024") -> list[dict[str,
         List of thread data, or empty list if server unavailable
     """
     try:
-        response = requests.post(f"{server_url}/threads/search", json={}, timeout=2)
-        response.raise_for_status()
+        response = _request("POST", "/threads/search", server_url=server_url, json={})
         return response.json()
-    except Exception:
+    except LangGraphError:
         return []
 
 
@@ -125,9 +206,11 @@ def is_server_available(server_url: str | None = None) -> bool:
         True if server is available, False otherwise
     """
     try:
-        response = requests.get(f"{server_url or get_server_url()}/ok", timeout=1)
+        response = requests.get(
+            f"{server_url or get_server_url()}/ok", timeout=min(1.0, SERVER_REQUEST_TIMEOUT)
+        )
         return response.status_code == 200
-    except Exception:
+    except requests.RequestException:
         return False
 
 
@@ -154,8 +237,7 @@ def create_thread_on_server(
     elif name:
         payload["metadata"] = {"name": name}
 
-    response = requests.post(f"{server_url or get_server_url()}/threads", json=payload, timeout=2)
-    response.raise_for_status()
+    response = _request("POST", "/threads", server_url=server_url, json=payload)
     return response.json()["thread_id"]
 
 
@@ -173,44 +255,65 @@ def fork_thread_on_server(thread_id: str, server_url: str | None = None) -> str:
         requests.HTTPError: If server returns error
         requests.Timeout: If request times out
     """
-    response = requests.post(
-        f"{server_url or get_server_url()}/threads/{thread_id}/copy", json={}, timeout=2
-    )
-    response.raise_for_status()
+    response = _request("POST", f"/threads/{thread_id}/copy", server_url=server_url, json={})
     return response.json()["thread_id"]
 
 
-def start_server_if_needed() -> bool:
+def start_server_if_needed() -> tuple[bool, str | None]:
     """Start LangGraph dev server if not already running.
 
     Attempts to start 'langgraph dev' in the background and waits
     for it to become available.
 
     Returns:
-        True if server is running (already was or successfully started),
-        False if failed to start
+        Tuple of (success flag, error message or None)
     """
     # Check if already running
     if is_server_available():
-        return True
+        return True, None
+
+    # Check for port conflicts before starting
+    try:
+        with socket.create_connection(("127.0.0.1", 2024), timeout=1):  # type: ignore[arg-type]
+            return False, "Port 2024 is already in use by another process"
+    except OSError:
+        pass
 
     # Try to start server
     try:
-        # Start langgraph dev in background, suppressing output
-        subprocess.Popen(
+        log_file = tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log")
+
+        process = subprocess.Popen(  # noqa: S603
             ["langgraph", "dev"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,  # Detach from parent process
+            start_new_session=True,
         )
 
-        # Wait up to 10 seconds for server to start
-        for _ in range(20):
+        _register_server_cleanup(process)
+
+        timeout_seconds = max(10, int(SERVER_REQUEST_TIMEOUT * 3))
+        attempts = int(timeout_seconds / 0.5)
+
+        for _ in range(attempts):
             time.sleep(0.5)
             if is_server_available():
-                return True
+                log_file.close()
+                return True, None
+            if process.poll() is not None:
+                _STARTED_SERVER_PROCESS = None
+                log_file.seek(0)
+                error_output = log_file.read().strip()
+                log_file.close()
+                error_msg = error_output or "LangGraph server exited unexpectedly"
+                return False, error_msg[:500]
 
-        return False
-    except Exception:
-        return False
+        log_file.close()
+        _cleanup_started_server()
+        return False, f"LangGraph server did not respond within {timeout_seconds}s"
+    except FileNotFoundError:
+        return False, "'langgraph' command not found. Install with: pip install langgraph-cli"
+    except Exception as exc:  # pragma: no cover - defensive
+        _cleanup_started_server()
+        return False, f"Failed to start LangGraph server: {exc}"

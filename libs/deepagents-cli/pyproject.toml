@@ -19,6 +19,7 @@ dependencies = [
   "langgraph-checkpoint-sqlite>=3.0.0",
   "langgraph-checkpoint-postgres>=3.0.0",
   "psycopg[binary,pool]>=3.0.0",
+  "tenacity>=8.0.0",
 ]
 
 [project.scripts]
@@ -63,6 +64,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-data]
 deepagents_cli = ["default_agent_prompt.md"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["deepagents_cli*"]
+exclude = ["issues*", "tests*"]
 
 [tool.ruff]
 line-length = 100

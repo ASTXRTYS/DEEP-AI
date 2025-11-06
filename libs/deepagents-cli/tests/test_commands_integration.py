@@ -217,3 +217,87 @@ def test_clear_with_thread_manager_creates_new_thread(
 
     # Verify token tracker was reset
     assert token_tracker.current_context == token_tracker.baseline_context
+
+
+# ============================================================================
+# LangSmith Metrics Format Tests
+# ============================================================================
+
+
+def test_format_thread_summary_with_metrics():
+    """Test _format_thread_summary() with LangSmith metrics."""
+    from deepagents_cli.commands import _format_thread_summary
+
+    thread = {
+        "id": "abc123def456",
+        "display_name": "Test Thread",
+        "trace_count": 42,
+        "langsmith_tokens": 15234,
+        "preview": "Some preview text",
+        "last_used": "2025-01-15T10:00:00Z",
+    }
+
+    summary = _format_thread_summary(thread, None)
+
+    assert "abc123de" in summary  # Short ID
+    assert "Test Thread" in summary
+    assert "42 traces" in summary
+    assert "15.2K tokens" in summary  # K abbreviation
+    assert "Some preview text" in summary
+
+
+def test_format_thread_summary_error_state():
+    """Test _format_thread_summary() shows ?? when LangSmith unavailable."""
+    from deepagents_cli.commands import _format_thread_summary
+
+    thread = {
+        "id": "abc123def456",
+        "display_name": "Test Thread",
+        "trace_count": None,  # Error state
+        "langsmith_tokens": 5000,
+        "preview": "Some preview text",
+        "last_used": "2025-01-15T10:00:00Z",
+    }
+
+    summary = _format_thread_summary(thread, None)
+
+    assert "?? traces" in summary  # Error indicator
+    assert "5.0K tokens" in summary  # K abbreviation for 5000
+
+
+def test_format_thread_summary_zero_traces():
+    """Test _format_thread_summary() with zero traces."""
+    from deepagents_cli.commands import _format_thread_summary
+
+    thread = {
+        "id": "abc123def456",
+        "display_name": "Empty Thread",
+        "trace_count": 0,  # Zero is valid (new thread)
+        "langsmith_tokens": 100,
+        "preview": None,
+        "last_used": "2025-01-15T10:00:00Z",
+    }
+
+    summary = _format_thread_summary(thread, None)
+
+    assert "0 traces" in summary  # Shows 0, not ??
+    assert "100 tokens" in summary  # No abbreviation
+
+
+def test_format_thread_summary_large_numbers():
+    """Test _format_thread_summary() formats large token counts."""
+    from deepagents_cli.commands import _format_thread_summary
+
+    thread = {
+        "id": "abc123def456",
+        "display_name": "Large Thread",
+        "trace_count": 150,
+        "langsmith_tokens": 2_500_000,  # 2.5M
+        "preview": None,
+        "last_used": "2025-01-15T10:00:00Z",
+    }
+
+    summary = _format_thread_summary(thread, None)
+
+    assert "150 traces" in summary
+    assert "2.5M tokens" in summary  # M abbreviation

@@ -32,7 +32,8 @@ async def handle_filesystem_permissions(
     except PERMISSION_ERRORS as exc:  # type: ignore[misc]
         tool_call_id = request.tool_call.get("id")
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Permission error in %%s: %%s", tool_name, exc)
+            # F-string avoids double %-formatting errors in logging.
+            logger.debug(f"Permission error in {tool_name}: {exc}")
         message = (
             f"[Permission denied] {tool_name} could not access the requested resource. "
             "The path is protected or requires elevated permissions."

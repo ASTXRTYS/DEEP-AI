@@ -36,35 +36,18 @@ DEEP_AGENTS_ASCII = """
  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
 """
 
-# Interactive commands
+# Interactive commands (shown in autocomplete)
+# Only essential, high-signal commands are listed here for clean UX.
+# Advanced commands still work but are hidden from autocomplete.
 COMMANDS = {
-    "clear": "Clear screen and reset conversation",
-    "help": "Show help information",
-    "tokens": "Show token usage for current session",
-    "quit": "Exit the CLI",
-    "exit": "Exit the CLI",
+    "help": "Show help and available commands",
+    "new [name]": "Create a new thread",
+    "threads": "Switch threads (interactive)",
+    "tokens": "Show token usage statistics",
+    "clear": "Clear screen",
+    "quit": "Exit",
 }
 
-# Common bash commands for autocomplete
-COMMON_BASH_COMMANDS = {
-    "ls": "List directory contents",
-    "ls -la": "List all files with details",
-    "cd": "Change directory",
-    "pwd": "Print working directory",
-    "cat": "Display file contents",
-    "grep": "Search text patterns",
-    "find": "Find files",
-    "mkdir": "Make directory",
-    "rm": "Remove file",
-    "cp": "Copy file",
-    "mv": "Move/rename file",
-    "echo": "Print text",
-    "touch": "Create empty file",
-    "head": "Show first lines",
-    "tail": "Show last lines",
-    "wc": "Count lines/words",
-    "chmod": "Change permissions",
-}
 
 # Maximum argument length for display
 MAX_ARG_LENGTH = 150
@@ -75,12 +58,23 @@ config = {"recursion_limit": 1000}
 # Rich console instance
 console = Console(highlight=False)
 
+# Server request timeout (seconds)
+try:
+    SERVER_REQUEST_TIMEOUT: float = float(os.getenv("LANGGRAPH_SERVER_TIMEOUT", "5"))
+except ValueError:
+    SERVER_REQUEST_TIMEOUT = 5.0
+
+# Async checkpointer (required since execute_task is async)
+# Set to "0" only for debugging/compatibility testing
+USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in {"1", "true", "True"}
+
 
 class SessionState:
-    """Holds mutable session state (auto-approve mode, etc)."""
+    """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False):
+    def __init__(self, auto_approve: bool = False, thread_manager=None) -> None:
         self.auto_approve = auto_approve
+        self.thread_manager = thread_manager
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

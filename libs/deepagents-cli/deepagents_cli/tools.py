@@ -17,15 +17,25 @@ tavily_client = (
 def http_request(
     url: str,
     method: str = "GET",
-    headers: dict[str, str] = None,
-    data: str | dict = None,
-    params: dict[str, str] = None,
+    headers: dict[str, str] | None = None,
+    data: str | dict | None = None,
+    params: dict[str, str] | None = None,
     timeout: int = 30,
 ) -> dict[str, Any]:
-    """Make HTTP requests to APIs and web services.
+    """Make HTTP requests to REST APIs and JSON endpoints.
+
+    **IMPORTANT**: This tool is for API calls that return JSON data, NOT for:
+    - Web scraping or fetching HTML pages (use web_search instead)
+    - Researching documentation (use web_search instead)
+    - General web browsing (use web_search instead)
+
+    Use this ONLY for programmatic API endpoints like:
+    - REST APIs (e.g., https://api.github.com/repos/...)
+    - JSON endpoints
+    - Webhook calls
 
     Args:
-        url: Target URL
+        url: Target API endpoint URL
         method: HTTP method (GET, POST, PUT, DELETE, etc.)
         headers: HTTP headers to include
         data: Request body data (string or dict)
@@ -54,6 +64,14 @@ def http_request(
             content = response.json()
         except:
             content = response.text
+            # Truncate large HTML responses to prevent context overflow
+            # If response is >50KB, it's likely HTML and should use web_search instead
+            if len(content) > 50000:
+                content = (
+                    content[:50000]
+                    + f"\n\n... [Response truncated - {len(content):,} chars total. "
+                    + "NOTE: For web pages and documentation, use web_search tool instead of http_request]"
+                )
 
         return {
             "success": response.status_code < 400,
@@ -129,12 +147,11 @@ def web_search(
         }
 
     try:
-        search_docs = tavily_client.search(
+        return tavily_client.search(
             query,
             max_results=max_results,
             include_raw_content=include_raw_content,
             topic=topic,
         )
-        return search_docs
     except Exception as e:
         return {"error": f"Web search error: {e!s}", "query": query}

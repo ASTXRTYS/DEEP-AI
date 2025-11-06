@@ -2,6 +2,13 @@
 
 Interactive command-line interface for DeepAgents - an AI coding assistant with file operations, web search, and shell command execution.
 
+## Runtime requirements & startup
+
+- Python **3.11.x or 3.12.x**. LangChain/LangGraph currently depend on Pydantic v1 compatibility shims that do not support Python 3.14 (see `README_PYTHON_VERSION.md` for details).
+- A LangGraph dev server must be running locally (`langgraph dev`). `main.py` will attempt to auto-start it, but you can start it manually in another shell if desired.
+- Checkpointing is handled by `AsyncSqliteSaver`. The CLI creates `~/.deepagents/<agent>/checkpoints.db` and streams with `agent.astream(...)`. Set `DEEPAGENTS_USE_ASYNC_CHECKPOINTER=0` only for debugging; synchronous checkpointing is not supported in production.
+- Permission errors from filesystem tools are handled by the `handle_filesystem_permissions` middleware, which converts `PermissionError`/`OSError` into readable tool responses instead of crashing the session.
+
 ## Architecture
 
 The CLI is organized into focused modules:
@@ -37,7 +44,6 @@ cli/
   - `COLORS` - Color scheme for terminal output
   - `DEEP_AGENTS_ASCII` - ASCII art banner
   - `COMMANDS` - Available slash commands
-  - `COMMON_BASH_COMMANDS` - Autocomplete options for bash commands
   - `console` - Rich Console instance
   - `create_model()` - Creates OpenAI or Anthropic model based on API keys
   - `get_default_coding_instructions()` - Loads default agent prompt
@@ -151,6 +157,10 @@ The agent can create and update a visual todo list for multi-step tasks.
 
 ### Human-in-the-Loop Shell Approval
 Shell commands require user approval with an interactive arrow-key menu.
+
+### Filesystem permission guard
+- Filesystem tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`) are wrapped by `handle_filesystem_permissions` middleware.
+- When an operation hits a protected path (e.g., `/usr/sbin/` on macOS), the middleware returns a `[Permission denied]` tool message instead of raising, preserving interactive workflows for both the primary agent and subagents.
 
 ### Multi-line Input
 - **Enter** - Submit (or accept completion if menu is open)

@@ -1,9 +1,10 @@
+"""Research agent example using web search capabilities."""
+
 import os
 from typing import Literal
 
-from tavily import TavilyClient
-
 from deepagents import create_deep_agent
+from tavily import TavilyClient
 
 # It's best practice to initialize the client once and reuse it.
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
@@ -14,9 +15,10 @@ def internet_search(
     query: str,
     max_results: int = 5,
     topic: Literal["general", "news", "finance"] = "general",
+    *,
     include_raw_content: bool = False,
-):
-    """Run a web search"""
+) -> str:
+    """Run a web search."""
     search_docs = tavily_client.search(
         query,
         max_results=max_results,

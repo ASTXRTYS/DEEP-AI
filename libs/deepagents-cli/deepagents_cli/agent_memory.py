@@ -1,5 +1,6 @@
 """Middleware for loading agent-specific long-term memory into the system prompt."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import NotRequired
 
@@ -145,6 +146,7 @@ class AgentMemoryMiddleware(AgentMiddleware):
         if "agent_memory" not in state or state.get("agent_memory") is None:
             file_data = self.backend.read(AGENT_MEMORY_FILE_PATH)
             return {"agent_memory": file_data}
+        return None
 
     async def abefore_agent(
         self,
@@ -162,8 +164,15 @@ class AgentMemoryMiddleware(AgentMiddleware):
         """
         # Only load memory if it hasn't been loaded yet
         if "agent_memory" not in state or state.get("agent_memory") is None:
-            file_data = self.backend.read(AGENT_MEMORY_FILE_PATH)
+            # Use async I/O to avoid blocking the event loop
+            if hasattr(runtime, "call_in_executor"):
+                file_data = await runtime.call_in_executor(
+                    self.backend.read, AGENT_MEMORY_FILE_PATH
+                )
+            else:
+                file_data = await asyncio.to_thread(self.backend.read, AGENT_MEMORY_FILE_PATH)
             return {"agent_memory": file_data}
+        return None
 
     def wrap_model_call(
         self,

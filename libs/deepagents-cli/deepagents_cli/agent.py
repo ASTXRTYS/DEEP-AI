@@ -8,7 +8,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
-from langchain.agents.middleware import HostExecutionPolicy
+from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.postgres import PostgresStore
 
@@ -16,7 +16,7 @@ from .agent_memory import AgentMemoryMiddleware
 from .config import COLORS, config, console, get_default_coding_instructions
 
 
-def list_agents():
+def list_agents() -> None:
     """List all available agents."""
     agents_dir = Path.home() / ".deepagents"
 
@@ -47,7 +47,7 @@ def list_agents():
     console.print()
 
 
-def reset_agent(agent_name: str, source_agent: str = None):
+def reset_agent(agent_name: str, source_agent: str | None = None) -> None:
     """Reset an agent to default or copy from another agent."""
     agents_dir = Path.home() / ".deepagents"
     agent_dir = agents_dir / agent_name
@@ -111,9 +111,19 @@ Some tool calls require user approval before execution. When a tool call is reje
 
 Respect the user's decisions and work with them collaboratively.
 
-### Web Search Tool Usage
+### Web Search and HTTP Request Tools
 
-When you use the web_search tool:
+**For research, documentation, or web content**: ALWAYS use `web_search`
+- Researching topics or technologies
+- Finding documentation or guides
+- Getting current information
+- web_search returns clean, summarized results optimized for research
+
+**For API calls**: Use `http_request` ONLY for JSON REST APIs
+- NOT for web pages, HTML, or documentation
+- ONLY for programmatic API endpoints (e.g., api.github.com, api.example.com)
+
+When you use web_search:
 1. The tool will return search results with titles, URLs, and content excerpts
 2. You MUST read and process these results, then respond naturally to the user
 3. NEVER show raw JSON or tool results directly to the user
@@ -139,8 +149,23 @@ When using the write_todos tool:
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
 
 
-def create_agent_with_config(model, assistant_id: str, tools: list):
-    """Create and configure an agent with the specified model and tools."""
+def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer=None):
+    """Create and configure an agent with the specified model and tools.
+
+    Args:
+        model: The LLM model instance (e.g., ChatAnthropic).
+        assistant_id: Unique agent identifier (used for file organization).
+        tools: List of tools available to the agent.
+        checkpointer: Optional pre-initialized checkpointer.
+                     - If None: Creates default SqliteSaver (local CLI, tests)
+                     - If AsyncSqliteSaver: Use for async CLI (via main.py context manager)
+                     - If InMemorySaver: Use for unit tests
+                     - If ServerCheckpointer: Server runtime injects this
+                     Server exports should pass checkpointer=None (server injects its own).
+
+    Returns:
+        Compiled agent graph with configured middleware and persistence.
+    """
     shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
     )
@@ -154,20 +179,24 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         agent_md.write_text(source_content)
 
     # Set up persistent checkpointing for short-term memory (conversations)
-    import sqlite3
-    checkpoint_db = agent_dir / "checkpoints.db"
-    # Direct construction - proper way for long-running applications
-    conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
-    checkpointer = SqliteSaver(conn)
+    # Only create default SqliteSaver if no checkpointer was provided
+    if checkpointer is None:
+        import sqlite3
 
-    # Initialize checkpointer schema if needed (first time setup)
-    try:
-        checkpointer.setup()
-    except Exception:
-        pass  # Already set up
+        checkpoint_db = agent_dir / "checkpoints.db"
+        # Direct construction - proper way for long-running applications
+        conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+
+        # Initialize checkpointer schema if needed (first time setup)
+        try:
+            checkpointer.setup()
+        except Exception:
+            pass  # Already set up
 
     # Set up PostgreSQL store for cross-conversation long-term memory
     import psycopg
+
     database_url = os.environ.get("DEEPAGENTS_DATABASE_URL", "postgresql://localhost/deepagents")
     # Direct construction for long-running applications
     pg_conn = psycopg.connect(database_url, autocommit=True)
@@ -206,24 +235,18 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
 
         action = "Overwrite" if os.path.exists(file_path) else "Create"
         line_count = len(content.splitlines())
-        size = len(content.encode("utf-8"))
 
-        return f"File: {file_path}\nAction: {action} file\nLines: {line_count} · Bytes: {size}"
+        return f"File: {file_path}\nAction: {action} file\nLines: {line_count}"
 
     def format_edit_file_description(tool_call: dict) -> str:
         """Format edit_file tool call for approval prompt."""
         args = tool_call.get("args", {})
         file_path = args.get("file_path", "unknown")
-        old_string = args.get("old_string", "")
-        new_string = args.get("new_string", "")
         replace_all = bool(args.get("replace_all", False))
-
-        delta = len(new_string) - len(old_string)
 
         return (
             f"File: {file_path}\n"
-            f"Action: Replace text ({'all occurrences' if replace_all else 'single occurrence'})\n"
-            f"Snippet delta: {delta:+} characters"
+            f"Action: Replace text ({'all occurrences' if replace_all else 'single occurrence'})"
         )
 
     def format_web_search_description(tool_call: dict) -> str:
@@ -255,8 +278,6 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         )
 
     # Configure human-in-the-loop for potentially destructive tools
-    from langchain.agents.middleware import InterruptOnConfig
-
     shell_interrupt_config: InterruptOnConfig = {
         "allowed_decisions": ["approve", "reject"],
         "description": lambda tool_call, state, runtime: (
@@ -285,7 +306,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
-    agent = create_deep_agent(
+    return create_deep_agent(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
@@ -301,5 +322,3 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
             "task": task_interrupt_config,
         },
     ).with_config(config)
-
-    return agent

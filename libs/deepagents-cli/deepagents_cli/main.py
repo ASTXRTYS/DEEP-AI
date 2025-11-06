@@ -10,11 +10,12 @@ from .commands import execute_bash_command, handle_command
 from .config import COLORS, DEEP_AGENTS_ASCII, SessionState, console, create_model
 from .execution import execute_task
 from .input import create_prompt_session
+from .thread_manager import ThreadManager
 from .tools import http_request, tavily_client, web_search
 from .ui import TokenTracker, show_help
 
 
-def check_cli_dependencies():
+def check_cli_dependencies() -> None:
     """Check if CLI optional dependencies are installed."""
     missing = []
 
@@ -44,14 +45,13 @@ def check_cli_dependencies():
         missing.append("prompt-toolkit")
 
     if missing:
-        print("\n❌ Missing required CLI dependencies!")
-        print("\nThe following packages are required to use the deepagents CLI:")
+        console.print("[bold red]Missing required CLI dependencies:[/bold red]")
         for pkg in missing:
-            print(f"  - {pkg}")
-        print("\nPlease install them with:")
-        print("  pip install deepagents[cli]")
-        print("\nOr install all dependencies:")
-        print("  pip install 'deepagents[cli]'")
+            console.print(f"  • {pkg}")
+        console.print()
+        console.print(
+            "Install them with: [cyan]pip install 'deepagents[cli]'[/cyan] or add them to your environment."
+        )
         sys.exit(1)
 
 
@@ -93,11 +93,20 @@ def parse_args():
     return parser.parse_args()
 
 
-async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0):
+async def simple_cli(
+    agent, assistant_id: str | None, session_state, baseline_tokens: int = 0
+) -> None:
     """Main CLI loop."""
+    from .server_client import is_server_available
+
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
+
+    # Show server status
+    if is_server_available():
+        console.print("[green]● Connected to LangGraph server[/green]")
+        console.print()
 
     if tavily_client is None:
         console.print(
@@ -141,7 +150,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
             break
         except KeyboardInterrupt:
             # Ctrl+C at prompt - exit the program
-            console.print("\n\nGoodbye!", style=COLORS["primary"])
+            console.print("\nGoodbye!", style=COLORS["primary"])
             break
 
         if not user_input:
@@ -149,7 +158,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker)
+            result = handle_command(user_input, agent, token_tracker, session_state)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -167,36 +176,96 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
             console.print("\nGoodbye!", style=COLORS["primary"])
             break
 
-        execute_task(user_input, agent, assistant_id, session_state, token_tracker)
+        await execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
 
-async def main(assistant_id: str, session_state):
+async def main(assistant_id: str, session_state) -> None:
     """Main entry point."""
+    from .server_client import is_server_available, start_server_if_needed
+
+    # Check if server is running, offer to start if not
+    if not is_server_available():
+        console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
+        console.print()
+        console.print("The DeepAgents CLI now requires the LangGraph server for thread management.")
+        console.print(
+            "This enables features like message history, thread naming, and Studio integration."
+        )
+        console.print()
+
+        # Try to start server automatically
+        console.print("[dim]Starting LangGraph dev server...[/dim]")
+        started, error_message = start_server_if_needed()
+        if started:
+            console.print("[green]✓ Server started successfully![/green]")
+            console.print()
+        else:
+            console.print("[red]✗ Failed to start server automatically[/red]")
+            console.print()
+            if error_message:
+                console.print(f"[red]{error_message}[/red]")
+                console.print()
+            console.print("Please start the server manually in another terminal:")
+            console.print("  [cyan]langgraph dev[/cyan]")
+            console.print()
+            console.print("Then restart the CLI.")
+            import sys
+
+            sys.exit(1)
+
     # Create the model (checks API keys)
     model = create_model()
+
+    # Initialize thread manager
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    thread_manager = ThreadManager(agent_dir, assistant_id)
+    session_state.thread_manager = thread_manager
 
     # Create agent with conditional tools
     tools = [http_request]
     if tavily_client is not None:
         tools.append(web_search)
 
-    agent = create_agent_with_config(model, assistant_id, tools)
+    # REQUIRED: AsyncSqliteSaver because execute_task is async (uses agent.astream())
+    # Upstream merge 5f8516c made execute_task async, so sync SqliteSaver no longer works
+    from .config import USE_ASYNC_CHECKPOINTER
 
-    # Calculate baseline token count for accurate token tracking
-    from .agent import get_system_prompt
-    from .token_utils import calculate_baseline_tokens
+    if not USE_ASYNC_CHECKPOINTER:
+        console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
+        console.print("[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]")
+        console.print()
 
-    agent_dir = Path.home() / ".deepagents" / assistant_id
-    system_prompt = get_system_prompt()
-    baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    # Ensure agent directory exists before creating database
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_db = agent_dir / "checkpoints.db"
 
     try:
-        await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+        # Keep context manager open for entire CLI session
+        # Context manager automatically calls asetup() on entry and aclose() on exit
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db.resolve())) as checkpointer:
+            # Create agent with async checkpointer
+            agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
+
+            # Calculate baseline token count for accurate token tracking
+            from .agent import get_system_prompt
+            from .token_utils import calculate_baseline_tokens
+
+            system_prompt = get_system_prompt()
+            baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+
+            # Run CLI loop - checkpointer stays open for entire session
+            await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
+        raise
 
 
-def cli_main():
+def cli_main() -> None:
     """Entry point for console script."""
     # Check dependencies first
     check_cli_dependencies()

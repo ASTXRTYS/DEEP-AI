@@ -226,58 +226,47 @@ async def main(assistant_id: str, session_state) -> None:
     if tavily_client is not None:
         tools.append(web_search)
 
-    # Initialize checkpointer based on USE_ASYNC_CHECKPOINTER flag
+    # REQUIRED: AsyncSqliteSaver because execute_task is async (uses agent.astream())
+    # Upstream merge 5f8516c made execute_task async, so sync SqliteSaver no longer works
     from .config import USE_ASYNC_CHECKPOINTER
 
-    if USE_ASYNC_CHECKPOINTER:
-        # Async mode: Use AsyncSqliteSaver with context manager
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    if not USE_ASYNC_CHECKPOINTER:
+        console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
+        console.print("[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]")
+        console.print()
 
-        # Ensure agent directory exists before creating database
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_db = agent_dir / "checkpoints.db"
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-        # from_conn_string expects a file path, not a URI
-        db_path = str(checkpoint_db.resolve())
+    # Ensure agent directory exists before creating database
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_db = agent_dir / "checkpoints.db"
 
-        try:
-            async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
-                await checkpointer.setup()
+    # AsyncSqliteSaver.from_conn_string expects a SQLite URI
+    db_uri = f"sqlite:///{checkpoint_db.resolve()}"
 
-                # Create agent with async checkpointer
-                agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
+    try:
+        async with AsyncSqliteSaver.from_conn_string(db_uri) as checkpointer:
+            await checkpointer.asetup()
 
-                # Calculate baseline token count for accurate token tracking
-                from .agent import get_system_prompt
-                from .token_utils import calculate_baseline_tokens
+            # Create agent with async checkpointer
+            agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
 
-                system_prompt = get_system_prompt()
-                baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+            # Calculate baseline token count for accurate token tracking
+            from .agent import get_system_prompt
+            from .token_utils import calculate_baseline_tokens
 
-                # Run CLI loop inside async context (keeps connection alive)
-                await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+            system_prompt = get_system_prompt()
+            baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 
-        except KeyboardInterrupt:
-            # Context manager exits cleanly on Ctrl+C
-            console.print("\n[yellow]Interrupted[/yellow]")
-        except Exception as e:
-            console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
-            raise
-    else:
-        # Sync mode: Use default SqliteSaver (created by agent factory)
-        agent = create_agent_with_config(model, assistant_id, tools, checkpointer=None)
-
-        # Calculate baseline token count for accurate token tracking
-        from .agent import get_system_prompt
-        from .token_utils import calculate_baseline_tokens
-
-        system_prompt = get_system_prompt()
-        baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
-
-        try:
+            # Run CLI loop inside async context (keeps connection alive)
             await simple_cli(agent, assistant_id, session_state, baseline_tokens)
-        except Exception as e:
-            console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
+
+    except KeyboardInterrupt:
+        # Context manager exits cleanly on Ctrl+C
+        console.print("\n[yellow]Interrupted[/yellow]")
+    except Exception as e:
+        console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
+        raise
 
 
 def cli_main() -> None:

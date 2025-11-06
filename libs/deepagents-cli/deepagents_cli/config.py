@@ -64,6 +64,10 @@ try:
 except ValueError:
     SERVER_REQUEST_TIMEOUT = 5.0
 
+# Async checkpointer (required since execute_task is async)
+# Set to "0" only for debugging/compatibility testing
+USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in {"1", "true", "True"}
+
 
 class SessionState:
     """Holds mutable session state (auto-approve mode, thread manager, etc)."""

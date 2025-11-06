@@ -572,6 +572,7 @@ name = "deepagents-cli"
 version = "0.0.7"
 source = { editable = "libs/deepagents-cli" }
 dependencies = [
+    { name = "aiosqlite" },
     { name = "deepagents" },
     { name = "filelock" },
     { name = "langchain-anthropic" },
@@ -616,6 +617,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.17.0" },
     { name = "deepagents", editable = "." },
     { name = "filelock", specifier = ">=3.15.0" },
     { name = "langchain-anthropic", specifier = ">=0.1.0" },

@@ -506,7 +506,9 @@ def show_interactive_help() -> None:
     console.print(
         "  @filename       Type @ to auto-complete files and inject content", style=COLORS["dim"]
     )
-    console.print("  /command        Type / to see available commands", style=COLORS["dim"])
+    console.print(
+        "  /command        Type /help to see commands (or press Tab after /)", style=COLORS["dim"]
+    )
     console.print(
         "  !command        Type ! to run bash commands (e.g., !ls, !git status)",
         style=COLORS["dim"],
@@ -594,7 +596,8 @@ def show_help() -> None:
         "  @filename       Type @ to auto-complete files and inject content", style=COLORS["dim"]
     )
     console.print(
-        "  /command        Type / to see available commands (auto-completes)", style=COLORS["dim"]
+        "  /command        Type /help to see commands (or press Tab after / for autocomplete)",
+        style=COLORS["dim"],
     )
     console.print()
 

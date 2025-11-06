@@ -43,6 +43,7 @@ COMMANDS = {
     "help": "Show help and available commands",
     "new [name]": "Create a new thread",
     "threads": "Switch threads (interactive)",
+    "tokens": "Show token usage statistics",
     "clear": "Clear screen",
     "quit": "Exit",
 }

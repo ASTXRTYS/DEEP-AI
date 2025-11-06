@@ -1,0 +1,219 @@
+"""Integration tests for slash command handling.
+
+Tests exercise the full command routing through handle_command() to ensure
+all canonical commands work correctly without requiring a LangGraph server.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from deepagents_cli.commands import handle_command
+from deepagents_cli.config import SessionState
+from deepagents_cli.ui import TokenTracker
+
+
+@pytest.fixture
+def mock_thread_manager():
+    """Lightweight mock ThreadManager with proper return structures."""
+    mock = MagicMock()
+    mock.get_current_thread_id.return_value = "thread-abc123"
+    mock.list_threads.return_value = []
+    mock.create_thread.return_value = "thread-new456"
+
+    # Stub get_thread_metadata to return proper dict structure
+    mock.get_thread_metadata.return_value = {
+        "id": "thread-new456",
+        "name": "New conversation",
+        "created": "2025-01-11T10:00:00Z",
+        "last_used": "2025-01-11T10:00:00Z",
+    }
+
+    return mock
+
+
+@pytest.fixture
+def session_state(mock_thread_manager):
+    """Real SessionState with mocked ThreadManager."""
+    return SessionState(auto_approve=False, thread_manager=mock_thread_manager)
+
+
+@pytest.fixture
+def token_tracker(monkeypatch):
+    """Real TokenTracker with spied display_session method."""
+    tracker = TokenTracker()
+    tracker.set_baseline(5000)
+
+    # Spy pattern - wraps real method while tracking calls
+    spy = MagicMock(wraps=tracker.display_session)
+    monkeypatch.setattr(tracker, "display_session", spy)
+
+    return tracker
+
+
+# ============================================================================
+# Core Command Routing Tests
+# ============================================================================
+
+
+@pytest.mark.parametrize("command", ["/quit", "/exit", "/q"])
+def test_quit_commands_return_exit_sentinel(command, session_state, token_tracker):
+    """Test all quit variants return 'exit' string."""
+    result = handle_command(command, None, token_tracker, session_state)
+    assert result == "exit"
+
+
+@patch("deepagents_cli.commands.console.print")
+def test_help_command_displays_and_returns_true(mock_print, session_state, token_tracker):
+    """Test /help displays help and returns True."""
+    result = handle_command("/help", None, token_tracker, session_state)
+
+    assert result is True
+    mock_print.assert_called()  # Verify help was displayed
+
+
+def test_tokens_command_calls_display_session(session_state, token_tracker):
+    """Test /tokens invokes TokenTracker.display_session()."""
+    result = handle_command("/tokens", None, token_tracker, session_state)
+
+    assert result is True
+    # Spy pattern allows direct assertion
+    token_tracker.display_session.assert_called_once()
+
+
+@patch("deepagents_cli.commands.console.print")
+def test_unknown_command_shows_warning(mock_print, session_state, token_tracker):
+    """Test unknown command shows warning and returns True."""
+    result = handle_command("/foobar", None, token_tracker, session_state)
+
+    assert result is True
+
+    # Robust assertion checking Rich output
+    assert any(
+        "unknown command" in (args[0].lower() if args else "")
+        for args, _ in mock_print.call_args_list
+    )
+
+
+# ============================================================================
+# Thread Management Tests
+# ============================================================================
+
+
+@patch("deepagents_cli.commands.console.print")
+def test_new_command_with_name(mock_print, session_state, token_tracker):
+    """Test /new with name creates thread with that name."""
+    result = handle_command("/new My Project", None, token_tracker, session_state)
+
+    assert result is True
+    session_state.thread_manager.create_thread.assert_called_once_with(name="My Project")
+
+
+@patch("deepagents_cli.commands.console.print")
+def test_new_command_without_name(mock_print, session_state, token_tracker):
+    """Test /new without name creates thread with name=None."""
+    result = handle_command("/new", None, token_tracker, session_state)
+
+    assert result is True
+    session_state.thread_manager.create_thread.assert_called_once_with(name=None)
+
+
+@patch("deepagents_cli.commands.console.print")
+def test_threads_with_args_shows_deprecation_warning(mock_print, session_state, token_tracker):
+    """Test /threads with arguments shows friendly error (deprecated subcommands)."""
+    result = handle_command("/threads continue abc123", None, token_tracker, session_state)
+
+    assert result is True
+
+    # Robust Rich output checking
+    assert any(
+        "doesn't take arguments" in (args[0].lower() if args else "")
+        for args, _ in mock_print.call_args_list
+    )
+
+
+@patch("builtins.input", return_value="1")
+@patch("deepagents_cli.commands._enrich_thread_with_server_data", side_effect=lambda t: t)
+@patch("deepagents_cli.commands.console.print")
+def test_threads_picker_interactive_flow(
+    mock_print, mock_enrich, mock_input, session_state, token_tracker
+):
+    """Test /threads interactive picker switches thread successfully."""
+    # Mock thread list with proper structure
+    sample_threads = [
+        {
+            "id": "thread-111",
+            "name": "First Thread",
+            "created": "2025-01-11T10:00:00Z",
+            "last_used": "2025-01-11T10:30:00Z",
+            "token_count": 1500,
+        },
+        {
+            "id": "thread-222",
+            "name": "Second Thread",
+            "created": "2025-01-11T11:00:00Z",
+            "last_used": "2025-01-11T11:30:00Z",
+            "token_count": 2500,
+        },
+    ]
+    session_state.thread_manager.list_threads.return_value = sample_threads
+    session_state.thread_manager.get_current_thread_id.return_value = "thread-111"
+
+    # Mock get_thread_metadata for success message
+    session_state.thread_manager.get_thread_metadata.return_value = {
+        "id": "thread-111",
+        "name": "First Thread",
+    }
+
+    result = handle_command("/threads", None, token_tracker, session_state)
+
+    assert result is True
+    session_state.thread_manager.switch_thread.assert_called_once_with("thread-111")
+
+
+# ============================================================================
+# Graceful Failure Tests
+# ============================================================================
+
+
+@patch("deepagents_cli.commands.console.clear")
+@patch("deepagents_cli.commands.console.print")
+def test_clear_without_thread_manager_shows_warning(mock_print, mock_clear, token_tracker):
+    """Test /clear without thread manager shows warning but still resets tracker."""
+    session_state_no_manager = SessionState(auto_approve=False, thread_manager=None)
+
+    result = handle_command("/clear", None, token_tracker, session_state_no_manager)
+
+    assert result is True
+
+    # Verify warning shown
+    assert any(
+        "thread manager not available" in (args[0].lower() if args else "")
+        for args, _ in mock_print.call_args_list
+    )
+
+    # Verify token tracker still reset
+    assert token_tracker.current_context == token_tracker.baseline_context
+
+    # Verify screen still cleared
+    mock_clear.assert_called_once()
+
+
+@patch("deepagents_cli.commands.console.clear")
+@patch("deepagents_cli.commands.console.print")
+def test_clear_with_thread_manager_creates_new_thread(
+    mock_print, mock_clear, session_state, token_tracker
+):
+    """Test /clear creates new thread and resets token tracker."""
+    result = handle_command("/clear", None, token_tracker, session_state)
+
+    assert result is True
+
+    # Critical assertions from feedback
+    session_state.thread_manager.create_thread.assert_called_once_with(name="New conversation")
+    mock_clear.assert_called_once()
+
+    # Verify token tracker was reset
+    assert token_tracker.current_context == token_tracker.baseline_context

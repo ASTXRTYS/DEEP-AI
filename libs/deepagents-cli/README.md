@@ -98,16 +98,7 @@ deepagents help
 
 **Thread Management**:
 - `/new [name]` - Create new thread
-- `/threads` - List all threads
-- `/threads continue <id>` - Switch to thread
-- `/threads fork [name]` - Fork current thread
-- `/threads info [id]` - Show thread details
-- `/threads rename <id> <name>` - Rename thread
-- `/threads delete <id>` - Delete thread (with confirmation)
-- `/threads cleanup [--days N]` - Delete threads older than N days (default: 30)
-- `/threads sync` - Reconcile metadata with checkpoints (recover or prune threads)
-- `/threads vacuum` - Reclaim disk space from deleted threads
-- `/threads stats` - Show database statistics
+- `/threads` - Interactive picker to list and switch threads
 
 ### Memory System
 
@@ -133,26 +124,12 @@ Stored in: `~/.deepagents/{agent_name}/`
 - Cleanup runs every 2 hours in the background
 - **Note**: Standalone CLI (`deepagents`) does NOT run automatic cleanup
 
-**Manual Cleanup (All Modes)**:
-```bash
-# Check database size and thread count
-/threads stats
+**Thread Management**:
+- Use `/threads` to view all threads and switch between them
+- Use `/new [name]` to create fresh threads
+- Old threads persist until automatic TTL cleanup (server mode) or manual deletion
 
-# Delete threads older than 30 days
-/threads cleanup --days 30
-
-# Reclaim disk space after deletions
-/threads vacuum
-
-# Repair metadata if automatic TTL deleted checkpoints
-/threads sync
-```
-
-**Best Practices**:
-- **CLI-only users**: Run `/threads cleanup --days 14` every 1-2 weeks
-- **Server users**: Automatic cleanup handles new threads, use `/threads cleanup` for old threads
-- Run `/threads vacuum` after bulk deletions to reclaim disk space
-- Monitor with `/threads stats` regularly
+**Note**: Manual cleanup commands (delete, vacuum, stats) are being restored in a future update. For now, use `/threads` + `/new` to manage conversations, or run the LangGraph server to enable automatic TTL-based cleanup.
 
 ## LangGraph Studio
 

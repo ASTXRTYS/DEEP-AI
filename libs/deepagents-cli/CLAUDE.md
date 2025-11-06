@@ -252,38 +252,32 @@ Context managers are only for short-lived scripts.
 
 **Recommendation**:
 - For **development with automatic cleanup**: Use `./start-dev.sh` (server + CLI)
-- For **CLI-only usage**: Run `/threads cleanup` manually to clean old threads
+- For **CLI-only usage**: Use `/threads` + `/new` to manage conversations until manual cleanup feature is restored (see Issue #15)
 
 **Important Limitations**:
 - TTL **only affects NEW data** created after the configuration is deployed
 - Existing threads/checkpoints are NOT retroactively affected
 - Requires server restart (`langgraph dev`) to take effect
 - Thread-level deletion (all checkpoints in a thread deleted together, not individual checkpoints)
-- TTL creates **orphaned metadata**: Checkpoints are deleted but `threads.json` entries remain (use `/threads cleanup` to sync)
 
-**Manual Cleanup Commands**:
+**Current Thread Management**:
 
-The CLI provides commands for manual checkpoint management:
+The CLI provides an interactive picker for thread management:
 
 ```bash
-# List all threads
+# Interactive picker to view and switch threads
 /threads
 
-# Delete specific thread
-/threads delete <id>
-
-# Bulk cleanup (delete threads older than N days)
-/threads cleanup --days 30
-
-# Reclaim disk space after deletions
-/threads vacuum
-
-# View database statistics
-/threads stats
+# Create new thread
+/new [name]
 ```
 
-**ThreadManager Methods** (for programmatic cleanup):
+**Note**: Manual cleanup commands (`delete`, `vacuum`, `stats`, `sync`) were removed to simplify the CLI. They will be restored in a future update (tracked in Issue #15) to provide CLI-only users with thread maintenance capabilities when the LangGraph server is offline.
+
+**ThreadManager Methods** (programmatic access still available):
 ```python
+# These methods remain available for programmatic use, though CLI commands are being redesigned
+
 # Delete specific thread
 thread_manager.delete_thread(thread_id, agent)
 
@@ -301,11 +295,8 @@ stats = thread_manager.get_database_stats()
 ```
 
 **Best Practices**:
-- **CLI-only users**: Run `/threads cleanup --days 14` every 1-2 weeks (manual equivalent of TTL)
-- **Server users**: TTL runs automatically, but run `/threads cleanup` to clean pre-TTL threads
-- Run `/threads vacuum` after bulk deletions to reclaim disk space
-- Monitor database size with `/threads stats`
-- Repair orphaned metadata after TTL by running `/threads sync`
+- **CLI-only users**: Use `/threads` to view threads and `/new` to start fresh conversations; run server mode periodically to enable automatic TTL cleanup
+- **Server users**: TTL runs automatically every 2 hours
 - Consider longer TTL for important conversations (14-90 days)
 - Document TTL policy for users (data retention period)
 
@@ -463,13 +454,8 @@ config = {"configurable": {"thread_id": thread_id}}
 - Conversations persist across CLI sessions
 
 **Thread Commands**:
-- `/new` - Create new thread
-- `/threads` - List all threads
-- `/threads continue <id>` - Switch to thread
-- `/threads fork [name]` - Fork current thread
-- `/threads info [id]` - Show thread details
-- `/threads rename <id> <name>` - Rename thread
-- `/threads sync` - Reconcile metadata with checkpoints
+- `/new [name]` - Create new thread
+- `/threads` - Interactive picker to list and switch threads
 
 ---
 

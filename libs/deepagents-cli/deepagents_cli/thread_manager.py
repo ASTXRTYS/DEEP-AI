@@ -299,8 +299,8 @@ class ThreadManager:
         current_id = self.get_current_thread_id()
         if thread_id == current_id:
             msg = (
-                "Cannot delete the current thread. Switch to another thread first with "
-                "'/threads continue <id>' or create a new thread with '/new'."
+                "Cannot delete the current thread. Switch to another thread first via "
+                "'/threads' or create a new thread with '/new'."
             )
             raise ValueError(msg)
 

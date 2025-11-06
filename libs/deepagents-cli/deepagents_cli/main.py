@@ -241,13 +241,10 @@ async def main(assistant_id: str, session_state) -> None:
     agent_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_db = agent_dir / "checkpoints.db"
 
-    # AsyncSqliteSaver.from_conn_string expects a SQLite URI
-    db_uri = f"sqlite:///{checkpoint_db.resolve()}"
-
     try:
-        async with AsyncSqliteSaver.from_conn_string(db_uri) as checkpointer:
-            await checkpointer.asetup()
-
+        # Keep context manager open for entire CLI session
+        # Context manager automatically calls asetup() on entry and aclose() on exit
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db.resolve())) as checkpointer:
             # Create agent with async checkpointer
             agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
 
@@ -258,11 +255,10 @@ async def main(assistant_id: str, session_state) -> None:
             system_prompt = get_system_prompt()
             baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 
-            # Run CLI loop inside async context (keeps connection alive)
+            # Run CLI loop - checkpointer stays open for entire session
             await simple_cli(agent, assistant_id, session_state, baseline_tokens)
 
     except KeyboardInterrupt:
-        # Context manager exits cleanly on Ctrl+C
         console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")

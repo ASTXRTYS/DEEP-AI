@@ -19,6 +19,7 @@ from langgraph.types import Checkpointer
 
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.filesystem_permission import handle_filesystem_permissions
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
 
@@ -96,6 +97,7 @@ def create_deep_agent(
 
     deepagent_middleware = [
         TodoListMiddleware(),
+        handle_filesystem_permissions,
         FilesystemMiddleware(backend=backend),
         SubAgentMiddleware(
             default_model=model,
@@ -103,6 +105,7 @@ def create_deep_agent(
             subagents=subagents if subagents is not None else [],
             default_middleware=[
                 TodoListMiddleware(),
+                handle_filesystem_permissions,
                 FilesystemMiddleware(backend=backend),
                 SummarizationMiddleware(
                     model=model,

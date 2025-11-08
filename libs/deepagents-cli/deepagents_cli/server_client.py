@@ -231,11 +231,12 @@ def create_thread_on_server(
         requests.HTTPError: If server returns error
         requests.Timeout: If request times out
     """
-    payload = {}
-    if metadata:
-        payload["metadata"] = metadata
-    elif name:
-        payload["metadata"] = {"name": name}
+    payload: dict[str, Any] = {}
+    merged_metadata = dict(metadata or {})
+    if name and "name" not in merged_metadata:
+        merged_metadata["name"] = name
+    if merged_metadata:
+        payload["metadata"] = merged_metadata
 
     response = _request("POST", "/threads", server_url=server_url, json=payload)
     return response.json()["thread_id"]

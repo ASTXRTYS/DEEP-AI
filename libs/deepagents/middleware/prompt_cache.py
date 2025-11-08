@@ -1,0 +1,61 @@
+"""Guarded prompt caching middleware for Anthropic models."""
+
+from __future__ import annotations
+
+from langchain_anthropic import ChatAnthropic
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import BaseMessage
+
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+
+
+def _message_has_content(message: BaseMessage) -> bool:
+    """Return True if the message has at least one content chunk."""
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return bool(content)
+    return content is not None
+
+
+class SafeAnthropicPromptCachingMiddleware(AnthropicPromptCachingMiddleware):
+    """Anthropic prompt caching middleware that skips empty-tail requests.
+
+    Anthropic requires the final assistant message to contain at least one content block
+    when cache control metadata is attached. LangChain allows an empty final assistant
+    message (e.g., after tool handoffs), which would trigger an IndexError inside the
+    Anthropic SDK when cache control is applied. This subclass simply skips prompt
+    caching for such requests to avoid the crash.
+    """
+
+    def _last_message_has_content(self, request: ModelRequest) -> bool:
+        if not request.messages:
+            return False
+        last_message = request.messages[-1]
+        return _message_has_content(last_message)
+
+    def _should_apply_caching(self, request: ModelRequest) -> bool:  # type: ignore[override]
+        if not super()._should_apply_caching(request):
+            return False
+
+        # Only applies to Anthropic chat models; defensive double-check.
+        if not isinstance(request.model, ChatAnthropic):
+            return False
+
+        if not self._last_message_has_content(request):
+            return False
+
+        # Skip caching entirely for handoff-triggered runs to avoid Anthropic crashes.
+        config = getattr(request.runtime, "config", {}) or {}
+        configurable = dict(config.get("configurable") or {})
+        metadata = dict(config.get("metadata") or {})
+        if configurable.get("handoff_requested") or metadata.get("handoff_requested"):
+            return False
+
+        return True
+
+    def _apply_cache_control(self, request: ModelRequest) -> None:  # type: ignore[override]
+        if not self._last_message_has_content(request):
+            return
+        super()._apply_cache_control(request)

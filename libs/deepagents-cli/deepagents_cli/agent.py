@@ -7,6 +7,12 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware import (
+    HandoffApprovalMiddleware,
+    HandoffCleanupMiddleware,
+    HandoffSummarizationMiddleware,
+    HandoffToolMiddleware,
+)
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -221,6 +227,11 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
+        # Handoff middleware stack (order matters!)
+        HandoffToolMiddleware(),  # Provides tool
+        HandoffSummarizationMiddleware(model=model),  # Generates summary on tool call
+        HandoffApprovalMiddleware(),  # HITL approval
+        HandoffCleanupMiddleware(),  # Auto-cleanup after first turn
     ]
 
     # Get the system prompt

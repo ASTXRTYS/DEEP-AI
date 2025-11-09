@@ -9,7 +9,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from .config import COLORS, console
-from .handoff_summarization import render_summary_markdown
+from .handoff_persistence import render_summary_markdown
 
 
 @dataclass

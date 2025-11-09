@@ -221,23 +221,6 @@ async def _enrich_threads_with_metrics(
     return threads
 
 
-def _parse_handoff_args(arg_string: str) -> dict[str, bool]:
-    tokens = shlex.split(arg_string) if arg_string else []
-    preview_only = any(token in {"--preview", "-p"} for token in tokens)
-    return {"preview_only": preview_only}
-
-
-async def _run_handoff_async(agent, session_state, *, preview_only: bool) -> None:
-    assistant_id = getattr(session_state.thread_manager, "assistant_id", None)
-    await execute_task(
-        "",
-        agent,
-        assistant_id,
-        session_state,
-        token_tracker=None,
-        handoff_request=True,
-        handoff_preview_only=preview_only,
-    )
 
 
 def _enrich_thread_with_server_data(thread: dict) -> dict:
@@ -428,11 +411,17 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
     return True
 
 
-async def _handle_handoff_command(
-    args: str,
-    agent,
-    session_state,
-) -> bool:
+async def handle_handoff_command(args: str, agent, session_state) -> bool:
+    """Handle /handoff command via tool invocation.
+
+    Args:
+        args: Command arguments (--preview or -p for preview only)
+        agent: The agent instance
+        session_state: Current session state
+
+    Returns:
+        True (command handled)
+    """
     if not session_state or not session_state.thread_manager:
         console.print()
         console.print("[red]Thread manager not available for handoff.[/red]")
@@ -445,21 +434,81 @@ async def _handle_handoff_command(
         console.print()
         return True
 
-    flags = _parse_handoff_args(args)
-    preview_only = flags["preview_only"]
+    # Parse args
+    preview_only = "--preview" in args or "-p" in args
+
+    # Get current thread info
+    thread_id = session_state.thread_manager.get_current_thread_id()
+    assistant_id = getattr(session_state.thread_manager, "assistant_id", None)
 
     console.print()
-    console.print(f"[{COLORS['primary']}]Preparing handoff summary...[/]")
+    console.print(f"[{COLORS['primary']}]Initiating handoff...[/]")
 
-    session_state.intent = "handoff"
+    # Invoke agent with handoff tool call
+    # The middleware stack will handle: summarization → approval → decision
+    from langchain_core.messages import HumanMessage
 
-    try:
-        await _run_handoff_async(agent, session_state, preview_only=preview_only)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Failed to complete handoff:[/red] {exc}")
+    result = await agent.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content="Please call the request_handoff tool to initiate thread handoff."
+                )
+            ]
+        },
+        config={
+            "configurable": {"thread_id": thread_id},
+            "metadata": {
+                "assistant_id": assistant_id or "agent",
+                "thread_id": thread_id,
+                "handoff_preview_only": preview_only,
+            },
+        },
+    )
+
+    # Check if handoff was approved
+    decision = result.get("handoff_decision", {})
+
+    if decision.get("type") == "approve":
+        # Extract summary info
+        summary_md = decision.get("summary_md", "")
+        summary_json = decision.get("summary_json", {})
+
+        # Create child thread (CLI responsibility)
+        child_name = summary_json.get("title", "Handoff continuation")
+        parent_thread_id = thread_id
+
+        child_id = session_state.thread_manager.create_thread(
+            name=child_name,
+            parent_id=parent_thread_id,
+            metadata={
+                "handoff": {
+                    "handoff_id": summary_json.get("handoff_id"),
+                    "source_thread_id": parent_thread_id,
+                    "pending": True,
+                    "cleanup_required": True,
+                }
+            },
+        )
+
+        # Write summary to agent.md before switching
+        from .handoff_persistence import write_summary_block
+
+        agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
+        write_summary_block(agent_md_path, summary_md)
+
+        # Switch to child thread
+        session_state.thread_manager.switch_thread(child_id)
+
         console.print()
-    finally:
-        session_state.intent = None
+        console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
+        console.print()
+
+    elif decision.get("type") == "reject":
+        console.print()
+        console.print("[yellow]Handoff cancelled by user.[/yellow]")
+        console.print()
+
     return True
 
 
@@ -552,7 +601,7 @@ async def handle_command(
         return await handle_thread_commands_async(args, session_state.thread_manager, agent)
 
     if base_cmd == "handoff":
-        return await _handle_handoff_command(args, agent, session_state)
+        return await handle_handoff_command(args, agent, session_state)
 
     console.print()
     console.print(f"[yellow]Unknown command: /{base_cmd}[/yellow]")

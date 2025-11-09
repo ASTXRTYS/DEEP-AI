@@ -215,32 +215,50 @@ def generate_handoff_summary(
 
 
 class HandoffSummarizationMiddleware(AgentMiddleware):
-    """Middleware that emits handoff summaries when explicitly requested."""
+    """Generate handoff summaries when request_handoff tool is called.
 
-    def __init__(
-        self,
-        model: BaseChatModel | str,
-        *,
-        summary_state_key: str = "handoff_proposal",
-    ) -> None:
+    This middleware listens for the request_handoff tool call and generates
+    a structured summary of the conversation. The summary is placed in state
+    for the approval middleware to present to the user.
+
+    Uses before_model hook to ensure summary is generated BEFORE the model
+    sees it in the next turn.
+    """
+
+    def __init__(self, model: BaseChatModel | str) -> None:
+        """Initialize summarization middleware.
+
+        Args:
+            model: Model to use for generating summaries
+        """
         super().__init__()
         self.model = _ensure_model(model)
-        self.summary_state_key = summary_state_key
 
-    def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        config = getattr(runtime, "config", {}) or {}
-        configurable = dict(config.get("configurable") or {})
-        metadata = dict(config.get("metadata") or {})
-        should_summarize = configurable.pop("handoff_requested", False) or metadata.get(
-            "handoff_requested", False
-        )
-        if not should_summarize:
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Generate summary if handoff tool was called.
+
+        Args:
+            state: Current agent state
+            runtime: Runtime context
+
+        Returns:
+            State update with handoff_proposal, or None if no handoff requested
+        """
+        # Check if handoff was requested
+        if not self._handoff_requested(state):
             return None
+
+        # Extract metadata
+        config = getattr(runtime, "config", {}) or {}
+        metadata = dict(config.get("metadata") or {})
+        configurable = dict(config.get("configurable") or {})
 
         assistant_id = metadata.get("assistant_id") or metadata.get("assistant") or "agent"
         parent_thread_id = configurable.get("thread_id") or metadata.get("thread_id") or "unknown"
+        preview_only = metadata.get("handoff_preview_only", False)
 
-        messages: Sequence[BaseMessage] = state.get("messages") or []
+        # Generate summary using helper function
+        messages = state.get("messages") or []
         summary = generate_handoff_summary(
             model=self.model,
             messages=messages,
@@ -248,15 +266,47 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             parent_thread_id=parent_thread_id,
         )
 
+        # Return proposal in state for approval middleware
         return {
-            self.summary_state_key: {
+            "handoff_proposal": {
                 "summary_json": summary.summary_json,
                 "summary_md": summary.summary_md,
                 "handoff_id": summary.handoff_id,
                 "assistant_id": assistant_id,
                 "parent_thread_id": parent_thread_id,
+                "preview_only": preview_only,
             }
         }
+
+    def _handoff_requested(self, state: AgentState) -> bool:
+        """Check if handoff was requested via tool call or state flag.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            True if handoff should be generated
+        """
+        # Check for explicit state flag
+        if state.get("handoff_requested"):
+            return True
+
+        # Check if last message was request_handoff tool call
+        messages = state.get("messages", [])
+        if not messages:
+            return False
+
+        last_msg = messages[-1]
+
+        # Check for tool calls in AIMessage
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            for tc in last_msg.tool_calls:
+                # Handle both dict and object formats
+                tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                if tool_name == "request_handoff":
+                    return True
+
+        return False
 
 
 __all__ = [

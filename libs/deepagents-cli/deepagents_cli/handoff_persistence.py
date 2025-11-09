@@ -7,10 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from deepagents.middleware.handoff_summarization import (
-    HandoffSummary,
-    render_summary_markdown,
-)
+from deepagents.middleware import HandoffSummary
+from deepagents.middleware.handoff_summarization import render_summary_markdown
 
 SUMMARY_START_TAG = "<current_thread_summary>"
 SUMMARY_END_TAG = "</current_thread_summary>"

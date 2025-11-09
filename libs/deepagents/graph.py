@@ -115,7 +115,7 @@ def create_deep_agent(
                     messages_to_keep=6,
                 ),
                 HandoffSummarizationMiddleware(model=model),
-                HandoffApprovalMiddleware(model=model),
+                HandoffApprovalMiddleware(),
                 SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                 PatchToolCallsMiddleware(),
             ],
@@ -128,7 +128,7 @@ def create_deep_agent(
             messages_to_keep=6,
         ),
         HandoffSummarizationMiddleware(model=model),
-        HandoffApprovalMiddleware(model=model),
+        HandoffApprovalMiddleware(),
         SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
     ]

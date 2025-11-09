@@ -5,19 +5,12 @@ import logging
 import os
 import shlex
 import subprocess
-import sys  # noqa: F401 - needed for test mocking
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
-
-try:  # POSIX-only modules for raw terminal input
-    import termios
-    import tty
-except ImportError:  # pragma: no cover - exercised indirectly via fallback paths
-    termios = None
-    tty = None
 
 from langsmith import Client
 from requests.exceptions import HTTPError

@@ -23,11 +23,6 @@ def _sample_thread(idx: int) -> dict:
 def test_select_thread_fallback_defaults_to_current(monkeypatch):
     threads = [_sample_thread(1), _sample_thread(2), _sample_thread(3)]
 
-    monkeypatch.setattr(commands, "termios", None)
-    monkeypatch.setattr(commands, "tty", None)
-    monkeypatch.setattr(commands.sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr(commands.sys.stdout, "isatty", lambda: False)
-
     current_id = threads[1]["id"]
 
     def fake_input(prompt: str) -> str:
@@ -42,11 +37,6 @@ def test_select_thread_fallback_defaults_to_current(monkeypatch):
 
 def test_select_thread_fallback_accepts_numeric_choice(monkeypatch):
     threads = [_sample_thread(1), _sample_thread(2), _sample_thread(3)]
-
-    monkeypatch.setattr(commands, "termios", None)
-    monkeypatch.setattr(commands, "tty", None)
-    monkeypatch.setattr(commands.sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr(commands.sys.stdout, "isatty", lambda: False)
 
     def fake_input(prompt: str) -> str:
         return "3"  # Select third entry

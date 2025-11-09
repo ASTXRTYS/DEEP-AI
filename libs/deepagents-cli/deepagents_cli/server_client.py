@@ -110,22 +110,6 @@ def get_thread_data(
         return None
 
 
-def get_all_threads(server_url: str = "http://127.0.0.1:2024") -> list[dict[str, Any]]:
-    """Get all threads from LangGraph server API.
-
-    Args:
-        server_url: The LangGraph server URL
-
-    Returns:
-        List of thread data, or empty list if server unavailable
-    """
-    try:
-        response = _request("POST", "/threads/search", server_url=server_url, json={})
-        return response.json()
-    except LangGraphError:
-        return []
-
-
 def extract_first_user_message(thread_data: dict[str, Any]) -> str | None:
     """Extract the first user message from thread data.
 
@@ -176,19 +160,6 @@ def extract_last_message_preview(thread_data: dict[str, Any]) -> str | None:
         return (content[:60] + "...") if len(content) > 60 else content
 
     return None
-
-
-def get_message_count(thread_data: dict[str, Any]) -> int:
-    """Get the count of messages in a thread.
-
-    Args:
-        thread_data: Thread data from server API
-
-    Returns:
-        Number of messages
-    """
-    messages = thread_data.get("values", {}).get("messages", [])
-    return len(messages)
 
 
 def get_server_url() -> str:

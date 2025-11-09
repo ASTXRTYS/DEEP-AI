@@ -6,6 +6,7 @@ import sys
 import termios
 import tty
 from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
@@ -27,6 +28,36 @@ from .ui import (
     render_todo_list,
 )
 from deepagents.middleware.handoff_summarization import HandoffSummary
+
+
+def _unwrap_interrupt(data: Any) -> dict | None:
+    """Unwrap interrupt payload to extract dict payload.
+
+    LangGraph interrupts can be nested in multiple ways:
+    - As a list: [InterruptObj]
+    - As an object with .value attribute
+    - As a bare dict
+
+    This function safely unwraps to the innermost dict payload.
+
+    Args:
+        data: Raw interrupt data from __interrupt__ field
+
+    Returns:
+        Dict payload if found, None otherwise
+    """
+    # Step 1: Unwrap list/tuple
+    if isinstance(data, (list, tuple)):
+        if not data:
+            return None
+        data = data[0]
+
+    # Step 2: Unwrap .value attribute (may be nested)
+    while hasattr(data, "value") and not isinstance(data, dict):
+        data = data.value
+
+    # Step 3: Validate final payload
+    return data if isinstance(data, dict) else None
 
 
 def _extract_tool_args(action_request: dict) -> dict | None:
@@ -301,24 +332,8 @@ async def execute_task(
                     # Check for interrupts - just capture the data, don't handle yet
                     if "__interrupt__" in data:
                         interrupt_data = data["__interrupt__"]
-                        if interrupt_data:
-                            # LangGraph emits a list of interrupts; take the first
-                            if isinstance(interrupt_data, (list, tuple)):
-                                interrupt_obj = interrupt_data[0]
-                            else:
-                                interrupt_obj = interrupt_data
-
-                            # Unwrap to the interrupt payload (value)
-                            hitl_request = (
-                                getattr(interrupt_obj, "value", interrupt_obj)
-                            )
-
-                            # If the value is itself a wrapper, unwrap again
-                            if not isinstance(hitl_request, dict) and hasattr(
-                                hitl_request, "value"
-                            ):
-                                hitl_request = hitl_request.value
-
+                        hitl_request = _unwrap_interrupt(interrupt_data)
+                        if hitl_request:
                             interrupt_occurred = True
 
                     # Extract chunk_data from updates for todo/proposal checking
@@ -540,17 +555,14 @@ async def execute_task(
 
             # Handle human-in-the-loop after stream completes
             if interrupt_occurred and hitl_request:
-                # Coerce hitl_request into a dict payload if possible
+                # hitl_request is already unwrapped by _unwrap_interrupt()
+                # but double-check it's a valid dict
                 if not isinstance(hitl_request, dict):
-                    if isinstance(hitl_request, (list, tuple)) and hitl_request:
-                        maybe = hitl_request[0]
-                        hitl_request = getattr(maybe, "value", maybe)
-                if not isinstance(hitl_request, dict):
-                    # Could not parse interrupt payload; abort HITL handling
                     hitl_request = None
 
                 decisions = []
                 handoff_interrupt_processed = False
+                handoff_decision_made = False
                 action_requests = (
                     hitl_request.get("action_requests", []) if hitl_request else []
                 )
@@ -569,8 +581,8 @@ async def execute_task(
                         )
                         if decision is None:
                             continue
-                        decision["_action"] = action_name
                         decisions.append(decision)
+                        handoff_decision_made = True
                         # Per design, do not continue streaming after handoff review
                         handoff_interrupt_processed = True
                         continue
@@ -584,7 +596,7 @@ async def execute_task(
                         console.print()
                         console.print(f"  [dim]⚡ {description}[/dim]")
 
-                        decisions.append({"type": "approve", "_action": action_name})
+                        decisions.append({"type": "approve"})
 
                         if not spinner_active:
                             status.start()
@@ -599,22 +611,16 @@ async def execute_task(
                             action_request,
                             assistant_id,
                         )
-                        decision["_action"] = action_name
                         decisions.append(decision)
 
-                suppress_resumed_output = any(
-                    decision.get("type") == "reject"
-                    and decision.get("_action") != "handoff_summary"
-                    for decision in decisions
+                # Suppress output if any non-handoff action was rejected
+                # (handoff rejections are handled specially and don't suppress)
+                suppress_resumed_output = (
+                    any(d.get("type") == "reject" for d in decisions)
+                    and not handoff_decision_made
                 )
 
-                cleaned_decisions = []
-                for decision in decisions:
-                    decision = dict(decision)
-                    decision.pop("_action", None)
-                    cleaned_decisions.append(decision)
-
-                hitl_response = {"decisions": cleaned_decisions}
+                hitl_response = {"decisions": decisions}
 
             # If we handled a handoff interrupt, exit immediately to avoid
             # further model calls or streaming. Side effects (summary write,
@@ -664,73 +670,20 @@ async def execute_task(
                     )
                     return
 
-                # Secondary fallback: try to fetch proposal from agent state
+                # If handoff was requested but no proposal received, it's a middleware error
                 if handoff_request and not last_handoff_proposal:
-                    try:
-                        state_snapshot = await agent.aget_state(config)
-                        proposal = state_snapshot.values.get("handoff_proposal")
-                    except Exception:
-                        proposal = None
-                    if isinstance(proposal, dict):
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
-                        action_request = {
-                            "name": "handoff_summary",
-                            "description": "Preview handoff summary for approval",
-                            "args": {
-                                "handoff_id": proposal.get("handoff_id"),
-                                "summary_json": proposal.get("summary_json"),
-                                "summary_md": proposal.get("summary_md"),
-                                "assistant_id": proposal.get("assistant_id"),
-                                "parent_thread_id": proposal.get("parent_thread_id"),
-                                "preview_only": config.get("metadata", {}).get("handoff_preview_only", False),
-                            },
-                        }
-                        _ = await _handle_handoff_interrupt(
-                            action_request,
-                            session_state=session_state,
-                            preview_only=config.get("metadata", {}).get("handoff_preview_only", False),
-                        )
-                        return
-
-                # Tertiary fallback: generate summary on the fly using middleware helper
-                if handoff_request and not last_handoff_proposal:
-                    try:
-                        from deepagents.middleware.handoff_summarization import (
-                            generate_handoff_summary,
-                        )
-                        state_snapshot = await agent.aget_state(config)
-                        messages = state_snapshot.values.get("messages", [])
-                        summary = generate_handoff_summary(
-                            model=session_state.model if hasattr(session_state, "model") else agent,
-                            messages=messages,
-                            assistant_id=assistant_id or "agent",
-                            parent_thread_id=thread_id,
-                        )
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
-                        action_request = {
-                            "name": "handoff_summary",
-                            "description": "Preview handoff summary for approval",
-                            "args": {
-                                "handoff_id": summary.handoff_id,
-                                "summary_json": summary.summary_json,
-                                "summary_md": summary.summary_md,
-                                "assistant_id": assistant_id or "agent",
-                                "parent_thread_id": thread_id,
-                                "preview_only": config.get("metadata", {}).get("handoff_preview_only", False),
-                            },
-                        }
-                        _ = await _handle_handoff_interrupt(
-                            action_request,
-                            session_state=session_state,
-                            preview_only=config.get("metadata", {}).get("handoff_preview_only", False),
-                        )
-                        return
-                    except Exception:
-                        pass
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+                    console.print(
+                        "[red]Error: Handoff requested but no summary proposal received.[/red]"
+                    )
+                    console.print(
+                        "[dim]This indicates a middleware configuration issue. "
+                        "Please check that HandoffSummarizationMiddleware is properly configured.[/dim]"
+                    )
+                    console.print()
+                    return
 
                 break
 

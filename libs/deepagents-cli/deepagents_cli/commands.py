@@ -302,31 +302,49 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
         Tuple of (thread_id, action) or (None, None) if cancelled
     """
     import questionary
-    from questionary import Choice
+    from questionary import Choice, Style
+
+    # Custom style matching CLI color scheme
+    custom_style = Style([
+        ('qmark', f'fg:{COLORS["primary"]} bold'),
+        ('question', 'bold'),
+        ('answer', f'fg:{COLORS["primary"]} bold'),
+        ('pointer', f'fg:{COLORS["primary"]} bold'),
+        ('highlighted', f'fg:{COLORS["primary"]} bold'),
+        ('selected', f'fg:{COLORS["primary"]}'),
+        ('instruction', 'fg:#888888 italic'),
+        ('text', ''),
+    ])
 
     console.print()
 
     # Build choices with formatted display
     choices = []
-    default_idx = 0
+    default_choice = None
 
-    for idx, thread in enumerate(threads):
+    for thread in threads:
         summary = _format_thread_summary(thread, current_thread_id)
-        choices.append(Choice(title=summary, value=thread["id"]))
+        choice = Choice(title=summary, value=thread["id"])
+        choices.append(choice)
 
         # Mark current thread as default
         if thread["id"] == current_thread_id:
-            default_idx = idx
+            default_choice = choice
 
-    # Step 1: Select thread
+    # Step 1: Select thread with search filtering for large lists
     try:
         selected_id = await questionary.select(
             "Select a thread:",
             choices=choices,
-            default=choices[default_idx] if choices else None,
+            default=default_choice,
             use_arrow_keys=True,
             use_indicator=True,
             use_shortcuts=False,
+            use_search_filter=len(threads) > 10,  # Enable search for 10+ threads
+            style=custom_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select, / search)" if len(threads) > 10 else "(↑↓ navigate, Enter select)",
         ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
@@ -345,22 +363,27 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
     short_id = selected_id[:8]
 
     console.print()
-    console.print(f"[{COLORS['primary']}]Selected: {thread_name} ({short_id})[/]")
+    console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
     console.print()
 
     action_choices = [
-        Choice(title="Switch to this thread", value="switch"),
-        Choice(title="Delete this thread", value="delete"),
-        Choice(title="Rename this thread", value="rename"),
-        Choice(title="Cancel", value="cancel"),
+        Choice(title="↻  Switch to this thread", value="switch"),
+        Choice(title="✕  Delete this thread", value="delete"),
+        Choice(title="✎  Rename this thread", value="rename"),
+        Choice(title="←  Cancel", value="cancel"),
     ]
 
     try:
         action = await questionary.select(
-            "What would you like to do?",
+            "Choose an action:",
             choices=action_choices,
             use_arrow_keys=True,
             use_indicator=True,
+            use_shortcuts=False,
+            style=custom_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select)",
         ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
@@ -383,6 +406,16 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
         True if user confirmed deletion, False otherwise
     """
     import questionary
+    from questionary import Style
+
+    # Warning style for deletion confirmation
+    warning_style = Style([
+        ('qmark', 'fg:#f59e0b bold'),  # Amber/orange for warning
+        ('question', 'bold'),
+        ('answer', 'fg:#ef4444 bold'),  # Red for destructive action
+        ('instruction', 'fg:#888888 italic'),
+        ('text', ''),
+    ])
 
     thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
@@ -398,28 +431,33 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
         token_display = f"{tokens:,}"
 
     console.print()
-    console.print(f"[yellow]⚠ Delete thread: {thread_name} ({short_id})?[/yellow]")
+    console.print(f"[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
+    console.print()
+    console.print(f"[bold]Thread:[/bold] {thread_name} [dim]({short_id})[/dim]")
     console.print()
     console.print("[dim]This will permanently delete:[/dim]")
-    console.print(f"[dim]  · All conversation history ({trace_count} traces)[/dim]")
-    console.print(f"[dim]  · {token_display} tokens of context[/dim]")
-    console.print(f"[dim]  · Cannot be undone[/dim]")
+    console.print(f"[dim]  • All conversation history ({trace_count} traces)[/dim]")
+    console.print(f"[dim]  • {token_display} tokens of context[/dim]")
+    console.print(f"[dim]  • Cannot be undone[/dim]")
     console.print()
 
     try:
         confirmation = await questionary.text(
             "Type 'DELETE' to confirm:",
-            validate=lambda text: text == "DELETE" or "Must type DELETE exactly",
+            validate=lambda text: text == "DELETE" or "Must type DELETE exactly (case-sensitive)",
+            style=warning_style,
+            qmark="⚠",
+            instruction="(Type DELETE in all caps to confirm)",
         ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
-        console.print("[dim]Deletion cancelled.[/dim]")
+        console.print("[dim]✓ Deletion cancelled.[/dim]")
         console.print()
         return False
 
     if confirmation != "DELETE":
         console.print()
-        console.print("[dim]Deletion cancelled.[/dim]")
+        console.print("[dim]✓ Deletion cancelled.[/dim]")
         console.print()
         return False
 
@@ -564,35 +602,49 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
         elif action == "rename":
             import questionary
+            from questionary import Style
+
+            # Custom style for rename
+            rename_style = Style([
+                ('qmark', f'fg:{COLORS["primary"]} bold'),
+                ('question', 'bold'),
+                ('answer', f'fg:{COLORS["primary"]} bold'),
+                ('instruction', 'fg:#888888 italic'),
+                ('text', ''),
+            ])
 
             console.print()
             try:
                 new_name = await questionary.text(
-                    f"New name for thread '{thread_name}':",
+                    "Enter new thread name:",
                     default=thread_name if thread_name != "(unnamed)" else "",
+                    style=rename_style,
+                    qmark="✎",
+                    instruction="(Enter to confirm, Ctrl+C to cancel)",
+                    validate=lambda text: len(text.strip()) > 0 or "Thread name cannot be empty",
                 ).ask_async()
             except (KeyboardInterrupt, EOFError):
                 console.print()
-                console.print("[dim]Rename cancelled.[/dim]")
+                console.print("[dim]✓ Rename cancelled.[/dim]")
                 console.print()
                 return True
 
-            if not new_name or new_name == thread_name:
+            if not new_name or new_name.strip() == thread_name:
                 console.print()
-                console.print("[dim]Rename cancelled.[/dim]")
+                console.print("[dim]✓ Rename cancelled.[/dim]")
                 console.print()
                 return True
 
             try:
-                thread_manager.rename_thread(target_id, new_name)
+                thread_manager.rename_thread(target_id, new_name.strip())
                 console.print()
                 console.print(
-                    f"[{COLORS['primary']}]✓ Renamed thread to: {new_name} ({short_id})[/{COLORS['primary']}]"
+                    f"[{COLORS['primary']}]✓ Renamed thread to: {new_name.strip()} [dim]({short_id})[/dim][/{COLORS['primary']}]"
                 )
                 console.print()
             except ValueError as e:
                 console.print()
-                console.print(f"[red]Error: {e}[/red]")
+                console.print(f"[red]✕ Error: {e}[/red]")
                 console.print()
 
         return True

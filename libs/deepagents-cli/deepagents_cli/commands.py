@@ -444,71 +444,21 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
     console.print()
     console.print(f"[{COLORS['primary']}]Initiating handoff...[/]")
 
-    # Invoke agent with handoff tool call
-    # The middleware stack will handle: summarization → approval → decision
-    from langchain_core.messages import HumanMessage
+    # Use execute_task to properly handle state-based interrupts via streaming
+    # This follows LangChain v1 best practices for interrupt handling
+    from .execution import execute_task
 
-    result = await agent.ainvoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content="Please call the request_handoff tool to initiate thread handoff."
-                )
-            ]
-        },
-        config={
-            "configurable": {"thread_id": thread_id},
-            "metadata": {
-                "assistant_id": assistant_id or "agent",
-                "thread_id": thread_id,
-                "handoff_preview_only": preview_only,
-            },
-        },
+    user_input = "Please call the request_handoff tool to initiate thread handoff."
+    
+    await execute_task(
+        user_input=user_input,
+        agent=agent,
+        assistant_id=assistant_id,
+        session_state=session_state,
+        token_tracker=None,
     )
 
-    # Check if handoff was approved
-    decision = result.get("handoff_decision", {})
-
-    if decision.get("type") == "approve":
-        # Extract summary info
-        summary_md = decision.get("summary_md", "")
-        summary_json = decision.get("summary_json", {})
-
-        # Create child thread (CLI responsibility)
-        child_name = summary_json.get("title", "Handoff continuation")
-        parent_thread_id = thread_id
-
-        child_id = session_state.thread_manager.create_thread(
-            name=child_name,
-            parent_id=parent_thread_id,
-            metadata={
-                "handoff": {
-                    "handoff_id": summary_json.get("handoff_id"),
-                    "source_thread_id": parent_thread_id,
-                    "pending": True,
-                    "cleanup_required": True,
-                }
-            },
-        )
-
-        # Write summary to agent.md before switching
-        from .handoff_persistence import write_summary_block
-
-        agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
-        write_summary_block(agent_md_path, summary_md)
-
-        # Switch to child thread
-        session_state.thread_manager.switch_thread(child_id)
-
-        console.print()
-        console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
-        console.print()
-
-    elif decision.get("type") == "reject":
-        console.print()
-        console.print("[yellow]Handoff cancelled by user.[/yellow]")
-        console.print()
-
+    # The execution loop handles approval UI and persistence when it detects handoff_approval_pending
     return True
 
 

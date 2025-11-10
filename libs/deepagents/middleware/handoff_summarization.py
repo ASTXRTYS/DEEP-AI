@@ -234,8 +234,11 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         super().__init__()
         self.model = _ensure_model(model)
 
-    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        """Generate summary if handoff tool was called.
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Generate summary after model proposes handoff tool call.
+
+        Runs in after_model to ensure tool call is detected in the same phase
+        as HandoffToolMiddleware sets the state flag.
 
         Args:
             state: Current agent state
@@ -246,6 +249,10 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         """
         # Check if handoff was requested
         if not self._handoff_requested(state):
+            return None
+        
+        # Skip if proposal already generated (prevent duplicate summaries)
+        if state.get("handoff_proposal"):
             return None
 
         # Extract metadata
@@ -266,16 +273,42 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             parent_thread_id=parent_thread_id,
         )
 
-        # Return proposal in state for approval middleware
+        # Build proposal dict with only serializable types
+        proposal = {
+            "summary_json": dict(summary.summary_json),  # Ensure plain dict
+            "summary_md": str(summary.summary_md),
+            "handoff_id": str(summary.handoff_id),
+            "assistant_id": str(assistant_id),
+            "parent_thread_id": str(parent_thread_id),
+            "preview_only": bool(preview_only),
+        }
+        
+        # Import interrupt here to avoid circular deps
+        from langgraph.types import interrupt
+        
+        # Emit interrupt with summary for approval
+        interrupt_payload = {
+            "schema_version": 1,
+            "middleware_source": "HandoffSummarizationMiddleware",
+            "action_requests": [{
+                "name": "handoff_summary",
+                "description": "Preview handoff summary for approval",
+                "args": proposal,
+            }]
+        }
+        
+        # Wait for human decision
+        resume_data = interrupt(interrupt_payload)
+        
+        # Extract decision
+        decisions = resume_data.get("decisions", []) if isinstance(resume_data, dict) else []
+        user_decision = decisions[0] if decisions else {"type": "reject"}
+        
+        # Return decision in state
         return {
-            "handoff_proposal": {
-                "summary_json": summary.summary_json,
-                "summary_md": summary.summary_md,
-                "handoff_id": summary.handoff_id,
-                "assistant_id": assistant_id,
-                "parent_thread_id": parent_thread_id,
-                "preview_only": preview_only,
-            }
+            "handoff_proposal": None,  # Clear after approval
+            "handoff_decision": dict(user_decision),  # Ensure plain dict
+            "handoff_approved": user_decision.get("type") == "approve",
         }
 
     def _handoff_requested(self, state: AgentState) -> bool:

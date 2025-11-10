@@ -318,7 +318,13 @@ async def execute_task(
                             interrupt_occurred = True
 
                     # Extract chunk_data from updates for todo/proposal checking
+                    # Debug: Check all values in data dict for handoff state
                     chunk_data = next(iter(data.values())) if data else None
+                    
+                    # Also check if handoff state is directly in data (not nested)
+                    if not chunk_data and isinstance(data, dict):
+                        chunk_data = data
+                    
                     if chunk_data and isinstance(chunk_data, dict):
                         # Check for todo updates
                         if "todos" in chunk_data:
@@ -332,6 +338,31 @@ async def execute_task(
                                 console.print()
                                 render_todo_list(new_todos)
                                 console.print()
+                        
+                        # Check for handoff approval pending in chunk_data OR in any nested dict
+                        proposal = chunk_data.get("handoff_proposal")
+                        approval_pending = chunk_data.get("handoff_approval_pending")
+                        
+                        # Also check the raw data dict itself
+                        if not proposal:
+                            for v in data.values():
+                                if isinstance(v, dict):
+                                    if "handoff_proposal" in v:
+                                        proposal = v["handoff_proposal"]
+                                    if "handoff_approval_pending" in v:
+                                        approval_pending = v["handoff_approval_pending"]
+                        
+                        if approval_pending and proposal:
+                            # Emit interrupt for CLI to handle
+                            hitl_request = {
+                                "schema_version": 1,
+                                "action_requests": [{
+                                    "name": "handoff_summary",
+                                    "description": "Preview handoff summary for approval",
+                                    "args": proposal,
+                                }]
+                            }
+                            interrupt_occurred = True
 
                 # Handle MESSAGES stream - for content and tool calls
                 elif current_stream_mode == "messages":
@@ -570,6 +601,36 @@ async def execute_task(
                             "summary_md": decision_result.summary_md,
                             "summary_json": decision_result.summary_json,
                         })
+
+                        # If accepted and not in preview mode, persist and switch threads now
+                        if decision_result.status == "accepted" and not args.get("preview_only", False):
+                            try:
+                                from deepagents_cli.handoff_persistence import apply_handoff_acceptance
+                                from deepagents.middleware.handoff_summarization import HandoffSummary
+
+                                parent_thread_id = args.get("parent_thread_id", "")
+                                hsum = HandoffSummary(
+                                    handoff_id=args.get("handoff_id", ""),
+                                    summary_json=decision_result.summary_json or args.get("summary_json", {}),
+                                    summary_md=decision_result.summary_md or args.get("summary_md", ""),
+                                )
+
+                                child_id = apply_handoff_acceptance(
+                                    session_state=session_state,
+                                    summary=hsum,
+                                    summary_md=hsum.summary_md,
+                                    summary_json=hsum.summary_json,
+                                    parent_thread_id=parent_thread_id,
+                                )
+
+                                # Switch to child thread
+                                session_state.thread_manager.switch_thread(child_id)
+                                console.print()
+                                console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
+                                console.print()
+                            except Exception:  # pragma: no cover - defensive
+                                # Non-fatal persistence errors shouldn't crash the run
+                                pass
                         continue
 
                     if session_state.auto_approve:

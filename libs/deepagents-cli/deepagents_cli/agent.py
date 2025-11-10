@@ -8,9 +8,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import (
-    HandoffApprovalMiddleware,
     HandoffCleanupMiddleware,
-    HandoffSummarizationMiddleware,
     HandoffToolMiddleware,
 )
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
@@ -227,11 +225,9 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
-        # Handoff middleware stack (order matters!)
-        HandoffToolMiddleware(),  # Provides tool
-        HandoffSummarizationMiddleware(model=model),  # Generates summary on tool call
-        HandoffApprovalMiddleware(),  # HITL approval
+        HandoffToolMiddleware(),  # Provides request_handoff tool
         HandoffCleanupMiddleware(),  # Auto-cleanup after first turn
+        # NOTE: HandoffSummarizationMiddleware and HandoffApprovalMiddleware are added in graph.py
     ]
 
     # Get the system prompt

@@ -19,7 +19,6 @@ from langgraph.types import Checkpointer
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.filesystem_permission import handle_filesystem_permissions
-from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
 from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from deepagents.middleware.prompt_cache import SafeAnthropicPromptCachingMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -114,8 +113,7 @@ def create_deep_agent(
                     max_tokens_before_summary=170000,
                     messages_to_keep=6,
                 ),
-                HandoffSummarizationMiddleware(model=model),
-                HandoffApprovalMiddleware(),
+                HandoffSummarizationMiddleware(model=model),  # Includes approval via interrupt()
                 SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                 PatchToolCallsMiddleware(),
             ],
@@ -127,8 +125,7 @@ def create_deep_agent(
             max_tokens_before_summary=170000,
             messages_to_keep=6,
         ),
-        HandoffSummarizationMiddleware(model=model),
-        HandoffApprovalMiddleware(),
+        HandoffSummarizationMiddleware(model=model),  # Includes approval via interrupt()
         SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
     ]

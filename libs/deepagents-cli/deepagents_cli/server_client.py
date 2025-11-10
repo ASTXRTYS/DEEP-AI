@@ -237,14 +237,30 @@ def delete_thread_on_server(thread_id: str, server_url: str | None = None) -> No
     Deletes the thread and all associated checkpoints via the server API.
     Deletion cascades automatically on the server side.
 
+    If the thread doesn't exist (404), this is treated as success since the
+    desired end state (thread not existing) is achieved.
+
     Args:
         thread_id: Thread ID to delete
         server_url: Optional server URL, defaults to get_server_url()
 
     Raises:
-        LangGraphError: If server request fails or times out
+        LangGraphError: If server request fails or times out (except 404)
     """
-    _request("DELETE", f"/threads/{thread_id}", server_url=server_url)
+    url = f"{server_url or get_server_url()}/threads/{thread_id}"
+    timeout = SERVER_REQUEST_TIMEOUT
+
+    try:
+        response = requests.delete(url, timeout=timeout)
+        # 204 No Content = success
+        # 404 Not Found = thread doesn't exist, which is the desired state
+        if response.status_code in (204, 404):
+            return
+        response.raise_for_status()
+    except requests.Timeout as exc:
+        raise LangGraphTimeoutError(f"Timed out talking to LangGraph at {url}") from exc
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        raise LangGraphRequestError(str(exc)) from exc
 
 
 def start_server_if_needed() -> tuple[bool, str | None]:

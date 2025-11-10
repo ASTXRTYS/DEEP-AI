@@ -69,8 +69,15 @@ def _extract_tool_args(action_request: dict) -> dict | None:
     return None
 
 
-def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
-    """Prompt user to approve/reject a tool action with arrow key navigation."""
+async def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
+    """Prompt user to approve/reject a tool action with questionary.
+
+    NOTE: This function is now async to support questionary's async API.
+    Callers must await this function.
+    """
+    import questionary
+    from questionary import Choice, Style
+
     description = action_request.get("description", "No description available")
     tool_name = action_request.get("name") or action_request.get("tool")
     tool_args = _extract_tool_args(action_request)
@@ -99,90 +106,46 @@ def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> 
         console.print()
         render_diff_block(preview.diff, preview.diff_title or preview.title)
 
-    options = ["approve", "reject"]
-    selected = 0  # Start with approve selected
+    # Questionary style for HITL approval
+    approval_style = Style([
+        ('qmark', 'fg:#10b981 bold'),
+        ('question', 'bold'),
+        ('answer', 'fg:#10b981 bold'),
+        ('pointer', 'fg:#10b981 bold'),
+        ('highlighted', 'fg:#ffffff bg:#10b981 bold'),  # White on green
+        ('selected', 'fg:#10b981'),
+        ('instruction', 'fg:#888888 italic'),
+        ('text', ''),
+        ('search_success', 'fg:#10b981'),  # Successful search results
+        ('search_none', 'fg:#888888'),  # No search results message
+        ('separator', 'fg:#888888'),  # Separators in lists
+    ])
 
+    console.print()
     try:
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
+        decision = await questionary.select(
+            "Choose an action:",
+            choices=[
+                Choice(title="✓  Approve (allow this tool to run)", value="approve"),
+                Choice(title="✕  Reject (block this tool)", value="reject"),
+            ],
+            default="approve",
+            use_arrow_keys=True,
+            use_indicator=True,
+            use_shortcuts=True,  # Allow 'a' and 'r' shortcuts
+            style=approval_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select, or press a/r)",
+        ).ask_async()
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        console.print("[dim]✓ Approval cancelled - tool rejected.[/dim]")
+        console.print()
+        return {"type": "reject", "message": "User cancelled approval"}
 
-        try:
-            tty.setraw(fd)
-            # Hide cursor during menu interaction
-            sys.stdout.write("\033[?25l")
-            sys.stdout.flush()
-
-            # Initial render flag
-            first_render = True
-
-            while True:
-                if not first_render:
-                    # Move cursor back to start of menu (up 2 lines, then to start of line)
-                    sys.stdout.write("\033[2A\r")
-
-                first_render = False
-
-                # Display options vertically with ANSI color codes
-                for i, option in enumerate(options):
-                    sys.stdout.write("\r\033[K")  # Clear line from cursor to end
-
-                    if i == selected:
-                        if option == "approve":
-                            # Green bold with filled checkbox
-                            sys.stdout.write("\033[1;32m☑ Approve\033[0m\n")
-                        else:
-                            # Red bold with filled checkbox
-                            sys.stdout.write("\033[1;31m☑ Reject\033[0m\n")
-                    elif option == "approve":
-                        # Dim with empty checkbox
-                        sys.stdout.write("\033[2m☐ Approve\033[0m\n")
-                    else:
-                        # Dim with empty checkbox
-                        sys.stdout.write("\033[2m☐ Reject\033[0m\n")
-
-                sys.stdout.flush()
-
-                # Read key
-                char = sys.stdin.read(1)
-
-                if char == "\x1b":  # ESC sequence (arrow keys)
-                    next1 = sys.stdin.read(1)
-                    next2 = sys.stdin.read(1)
-                    if next1 == "[":
-                        if next2 == "B":  # Down arrow
-                            selected = (selected + 1) % len(options)
-                        elif next2 == "A":  # Up arrow
-                            selected = (selected - 1) % len(options)
-                elif char in {"\r", "\n"}:  # Enter
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-                elif char == "\x03":  # Ctrl+C
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    raise KeyboardInterrupt
-                elif char.lower() == "a":
-                    selected = 0
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-                elif char.lower() == "r":
-                    selected = 1
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-
-        finally:
-            # Show cursor again
-            sys.stdout.write("\033[?25h")
-            sys.stdout.flush()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    except (termios.error, AttributeError):
-        # Fallback for non-Unix systems
-        console.print("  ☐ (A)pprove  (default)")
-        console.print("  ☐ (R)eject")
-        choice = input("\nChoice (A/R, default=Approve): ").strip().lower()
-        selected = 1 if choice in {"r", "reject"} else 0
-
-    # Return decision based on selection
-    if selected == 0:
+    console.print()
+    if decision == "approve":
         return {"type": "approve"}
     return {"type": "reject", "message": "User rejected the command"}
 
@@ -598,8 +561,8 @@ async def execute_task(
                     )
 
                     # Get user decision (approve/refine/reject)
-                    decision_result = await asyncio.to_thread(
-                        prompt_handoff_decision,
+                    # prompt_handoff_decision is now async, so await directly
+                    decision_result = await prompt_handoff_decision(
                         proposal,
                         preview_only=False,
                     )
@@ -691,8 +654,8 @@ async def execute_task(
                                 status.stop()
                                 spinner_active = False
 
-                            decision = await asyncio.to_thread(
-                                prompt_for_tool_approval,
+                            # prompt_for_tool_approval is now async, so await directly
+                            decision = await prompt_for_tool_approval(
                                 action_request,
                                 assistant_id,
                             )

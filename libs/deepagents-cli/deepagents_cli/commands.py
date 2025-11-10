@@ -305,15 +305,19 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
     from questionary import Choice, Style
 
     # Custom style matching CLI color scheme
+    # Key insight from questionary docs: highlighted needs BACKGROUND color to be visually obvious
     custom_style = Style([
         ('qmark', f'fg:{COLORS["primary"]} bold'),
         ('question', 'bold'),
         ('answer', f'fg:{COLORS["primary"]} bold'),
         ('pointer', f'fg:{COLORS["primary"]} bold'),
-        ('highlighted', f'fg:{COLORS["primary"]} bold'),
+        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),  # White text on green background
         ('selected', f'fg:{COLORS["primary"]}'),
         ('instruction', 'fg:#888888 italic'),
         ('text', ''),
+        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
+        ('search_none', 'fg:#888888'),  # No search results message
+        ('separator', 'fg:#888888'),  # Separators in lists
     ])
 
     console.print()
@@ -344,7 +348,7 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
             style=custom_style,
             qmark="▶",
             pointer="●",
-            instruction="(↑↓ navigate, Enter select, / search)" if len(threads) > 10 else "(↑↓ navigate, Enter select)",
+            instruction="(↑↓ navigate, Enter select, type to search)" if len(threads) > 10 else "(↑↓ navigate, Enter select)",
         ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
@@ -366,6 +370,21 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
     console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
     console.print()
 
+    # Action menu style - same background highlighting
+    action_style = Style([
+        ('qmark', f'fg:{COLORS["primary"]} bold'),
+        ('question', 'bold'),
+        ('answer', f'fg:{COLORS["primary"]} bold'),
+        ('pointer', f'fg:{COLORS["primary"]} bold'),
+        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),  # Consistent highlighting
+        ('selected', f'fg:{COLORS["primary"]}'),
+        ('instruction', 'fg:#888888 italic'),
+        ('text', ''),
+        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
+        ('search_none', 'fg:#888888'),  # No search results message
+        ('separator', 'fg:#888888'),  # Separators in lists
+    ])
+
     action_choices = [
         Choice(title="↻  Switch to this thread", value="switch"),
         Choice(title="✕  Delete this thread", value="delete"),
@@ -380,7 +399,7 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
             use_arrow_keys=True,
             use_indicator=True,
             use_shortcuts=False,
-            style=custom_style,
+            style=action_style,
             qmark="▶",
             pointer="●",
             instruction="(↑↓ navigate, Enter select)",

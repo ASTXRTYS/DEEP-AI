@@ -33,7 +33,7 @@ class HandoffDecision:
     summary_json: dict[str, Any] = field(default_factory=dict)
 
 
-def prompt_handoff_decision(
+async def prompt_handoff_decision(
     proposal: HandoffProposal,
     *,
     preview_only: bool = False,
@@ -71,89 +71,103 @@ def prompt_handoff_decision(
             summary_json=proposal.summary_json,
         )
 
+    import questionary
+    from questionary import Choice, Style
+
+    # Handoff approval style
+    handoff_style = Style([
+        ('qmark', f'fg:{COLORS["primary"]} bold'),
+        ('question', 'bold'),
+        ('answer', f'fg:{COLORS["primary"]} bold'),
+        ('pointer', f'fg:{COLORS["primary"]} bold'),
+        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),
+        ('selected', f'fg:{COLORS["primary"]}'),
+        ('instruction', 'fg:#888888 italic'),
+        ('text', ''),
+        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
+        ('search_none', 'fg:#888888'),  # No search results message
+        ('separator', 'fg:#888888'),  # Separators in lists
+    ])
+
     console.print()
-    console.print(
-        "  [green]☐ (A)pprove[/green] - Accept and proceed with handoff",
-        style=COLORS["dim"],
-    )
-    console.print(
-        "  [yellow]☐ (R)efine[/yellow] - Regenerate summary with feedback",
-        style=COLORS["dim"],
-    )
-    console.print(
-        "  [red]☐ (D)ecline[/red] - Cancel handoff",
-        style=COLORS["dim"],
-    )
+    try:
+        decision = await questionary.select(
+            "Review the handoff summary and choose an action:",
+            choices=[
+                Choice(title="✓  Approve (proceed with handoff)", value="approve"),
+                Choice(title="⟲  Refine (regenerate with feedback)", value="refine"),
+                Choice(title="✕  Decline (cancel handoff)", value="decline"),
+            ],
+            default="approve",
+            use_arrow_keys=True,
+            use_indicator=True,
+            use_shortcuts=True,  # Allow a/r/d shortcuts
+            style=handoff_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select, or press a/r/d)",
+        ).ask_async()
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        console.print("[dim]✓ Handoff cancelled.[/dim]")
+        console.print()
+        return HandoffDecision(type="reject")
+
     console.print()
 
-    while True:
-        choice = input("Decision [A/r/d, default=Approve]: ").strip().lower()
+    if decision == "approve":
+        console.print("[green]✓ Handoff summary approved[/green]")
+        console.print()
+        return HandoffDecision(
+            type="approve",
+            summary_md=proposal.summary_md,
+            summary_json=proposal.summary_json,
+        )
 
-        if choice in {"", "a", "approve"}:
-            console.print("[green]✓ Handoff summary approved[/green]")
-            console.print()
-            return HandoffDecision(
-                type="approve",
-                summary_md=proposal.summary_md,
-                summary_json=proposal.summary_json,
-            )
+    elif decision == "refine":
+        console.print()
+        console.print("[yellow]Provide feedback to improve the summary:[/yellow]")
+        console.print()
+        console.print(
+            "[dim]Examples: 'Add more technical details', 'Make it shorter', 'Focus on implementation changes'[/dim]"
+        )
+        console.print()
 
-        elif choice in {"r", "refine"}:
+        try:
+            feedback = await questionary.text(
+                "Enter your feedback:",
+                multiline=True,
+                style=handoff_style,
+                qmark="✎",
+                instruction="(Type feedback, press Alt+Enter or Esc then Enter to finish)",
+                validate=lambda text: len(text.strip()) > 0 or "Feedback cannot be empty for refinement",
+            ).ask_async()
+        except (KeyboardInterrupt, EOFError):
             console.print()
-            console.print("[yellow]Refining summary with LLM assistance...[/yellow]")
+            console.print("[dim]✓ Refinement cancelled.[/dim]")
             console.print()
-            console.print(
-                "Enter your feedback for how to improve the summary.",
-                style=COLORS["dim"],
-            )
-            console.print(
-                "Examples: 'Add more technical details', 'Make it shorter', 'Focus on implementation changes'",
-                style=COLORS["dim"],
-            )
-            console.print()
+            return HandoffDecision(type="reject")
 
-            # Collect multi-line feedback
-            feedback_lines = []
-            console.print("Enter feedback (press Enter twice to finish):")
-            while True:
-                line = input("> ").strip()
-                if not line:
-                    if not feedback_lines:
-                        # Empty feedback - prompt again
-                        console.print(
-                            "[yellow]Please provide feedback for refinement.[/yellow]"
-                        )
-                        continue
-                    # Empty line submitted after some feedback - done
-                    break
-                feedback_lines.append(line)
+        console.print()
+        console.print(
+            f"[dim]Feedback: {feedback[:100]}{'...' if len(feedback) > 100 else ''}[/dim]"
+        )
+        console.print()
+        return HandoffDecision(
+            type="refine",
+            feedback=feedback,
+            summary_md=proposal.summary_md,
+            summary_json=proposal.summary_json,
+        )
 
-            feedback = " ".join(feedback_lines)
-            console.print()
-            console.print(
-                f"[dim]Feedback: {feedback[:100]}{'...' if len(feedback) > 100 else ''}[/dim]"
-            )
-            console.print()
-            return HandoffDecision(
-                type="refine",
-                feedback=feedback,
-                summary_md=proposal.summary_md,
-                summary_json=proposal.summary_json,
-            )
-
-        elif choice in {"d", "decline", "reject"}:
-            console.print("[yellow]Handoff declined by user.[/yellow]")
-            console.print()
-            return HandoffDecision(
-                type="reject",
-                summary_md=proposal.summary_md,
-                summary_json=proposal.summary_json,
-            )
-
-        else:
-            console.print(
-                "[red]Invalid selection. Please enter A, R, or D.[/red]"
-            )
+    else:  # decline
+        console.print("[yellow]✕ Handoff declined by user.[/yellow]")
+        console.print()
+        return HandoffDecision(
+            type="reject",
+            summary_md=proposal.summary_md,
+            summary_json=proposal.summary_json,
+        )
 
 
 __all__ = ["HandoffProposal", "HandoffDecision", "prompt_handoff_decision"]

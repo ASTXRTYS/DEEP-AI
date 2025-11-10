@@ -338,32 +338,9 @@ async def execute_task(
                                 console.print()
                                 render_todo_list(new_todos)
                                 console.print()
-                        
-                        # Check for handoff approval pending in chunk_data OR in any nested dict
-                        # Issue #4: Updated to use _handoff_proposal (underscore prefix for internal state)
-                        proposal = chunk_data.get("_handoff_proposal")
-                        approval_pending = chunk_data.get("handoff_approval_pending")
 
-                        # Also check the raw data dict itself
-                        if not proposal:
-                            for v in data.values():
-                                if isinstance(v, dict):
-                                    if "_handoff_proposal" in v:
-                                        proposal = v["_handoff_proposal"]
-                                    if "handoff_approval_pending" in v:
-                                        approval_pending = v["handoff_approval_pending"]
-                        
-                        if approval_pending and proposal:
-                            # Emit interrupt for CLI to handle
-                            hitl_request = {
-                                "schema_version": 1,
-                                "action_requests": [{
-                                    "name": "handoff_summary",
-                                    "description": "Preview handoff summary for approval",
-                                    "args": proposal,
-                                }]
-                            }
-                            interrupt_occurred = True
+                        # Handoff interrupts are now handled via HandoffApprovalMiddleware.interrupt()
+                        # Detection happens through __interrupt__ field (line 314), not state updates
 
                 # Handle MESSAGES stream - for content and tool calls
                 elif current_stream_mode == "messages":
@@ -566,104 +543,114 @@ async def execute_task(
                     hitl_request = None
 
                 decisions = []
-                action_requests = (
-                    hitl_request.get("action_requests", []) if hitl_request else []
-                )
+                # Check for new simplified handoff schema (from refactored HandoffApprovalMiddleware)
+                if hitl_request and hitl_request.get("action") == "approve_handoff":
+                    # Import handoff UI
+                    from .handoff_ui import HandoffProposal, prompt_handoff_decision
 
-                for action_request in action_requests:
-                    action_name = action_request.get("name")
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
 
-                    if action_name == "handoff_summary":
-                        # Import handoff UI
-                        from .handoff_ui import HandoffProposal, prompt_handoff_decision
+                    # New simplified schema: payload is flat dict, not nested
+                    proposal = HandoffProposal(
+                        handoff_id=hitl_request.get("handoff_id", ""),
+                        summary_json=hitl_request.get("summary_json", {}),
+                        summary_md=hitl_request.get("summary", ""),  # "summary" key in new schema
+                        parent_thread_id=hitl_request.get("parent_thread_id", ""),
+                        assistant_id=hitl_request.get("assistant_id", ""),
+                    )
+                    decision_result = await asyncio.to_thread(
+                        prompt_handoff_decision,
+                        proposal,
+                        preview_only=False,  # Not in simplified schema
+                    )
 
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
+                    # Add decision in simplified format (HandoffApprovalMiddleware expects "approved" key)
+                    decisions.append({
+                        "approved": decision_result.status == "accepted",
+                        "summary_md": decision_result.summary_md,
+                        "summary_json": decision_result.summary_json,
+                    })
 
-                        # Present to user
-                        args = action_request.get("args", {})
-                        proposal = HandoffProposal(
-                            handoff_id=args.get("handoff_id", ""),
-                            summary_json=args.get("summary_json", {}),
-                            summary_md=args.get("summary_md", ""),
-                            parent_thread_id=args.get("parent_thread_id", ""),
-                            assistant_id=args.get("assistant_id", ""),
-                        )
-                        decision_result = await asyncio.to_thread(
-                            prompt_handoff_decision,
-                            proposal,
-                            preview_only=args.get("preview_only", False),
-                        )
+                    # If accepted, persist and switch threads now
+                    if decision_result.status == "accepted":
+                        try:
+                            from deepagents_cli.handoff_persistence import apply_handoff_acceptance
+                            from deepagents.middleware.handoff_summarization import HandoffSummary
 
-                        # Add to decisions list
-                        decisions.append({
-                            "type": "approve" if decision_result.status == "accepted" else "reject",
-                            "summary_md": decision_result.summary_md,
-                            "summary_json": decision_result.summary_json,
-                        })
+                            parent_thread_id = hitl_request.get("parent_thread_id", "")
+                            hsum = HandoffSummary(
+                                handoff_id=hitl_request.get("handoff_id", ""),
+                                summary_json=decision_result.summary_json or hitl_request.get("summary_json", {}),
+                                summary_md=decision_result.summary_md or hitl_request.get("summary", ""),
+                            )
 
-                        # If accepted and not in preview mode, persist and switch threads now
-                        if decision_result.status == "accepted" and not args.get("preview_only", False):
-                            try:
-                                from deepagents_cli.handoff_persistence import apply_handoff_acceptance
-                                from deepagents.middleware.handoff_summarization import HandoffSummary
+                            child_id = apply_handoff_acceptance(
+                                session_state=session_state,
+                                summary=hsum,
+                                summary_md=hsum.summary_md,
+                                summary_json=hsum.summary_json,
+                                parent_thread_id=parent_thread_id,
+                            )
 
-                                parent_thread_id = args.get("parent_thread_id", "")
-                                hsum = HandoffSummary(
-                                    handoff_id=args.get("handoff_id", ""),
-                                    summary_json=decision_result.summary_json or args.get("summary_json", {}),
-                                    summary_md=decision_result.summary_md or args.get("summary_md", ""),
-                                )
+                            # Switch to child thread
+                            session_state.thread_manager.switch_thread(child_id)
+                            console.print()
+                            console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
+                            console.print()
+                        except Exception:  # pragma: no cover - defensive
+                            # Non-fatal persistence errors shouldn't crash the run
+                            pass
 
-                                child_id = apply_handoff_acceptance(
-                                    session_state=session_state,
-                                    summary=hsum,
-                                    summary_md=hsum.summary_md,
-                                    summary_json=hsum.summary_json,
-                                    parent_thread_id=parent_thread_id,
-                                )
+                # Handle other HITL actions (tool approvals) with legacy schema
+                else:
+                    action_requests = (
+                        hitl_request.get("action_requests", []) if hitl_request else []
+                    )
 
-                                # Switch to child thread
-                                session_state.thread_manager.switch_thread(child_id)
-                                console.print()
-                                console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
-                                console.print()
-                            except Exception:  # pragma: no cover - defensive
-                                # Non-fatal persistence errors shouldn't crash the run
-                                pass
-                        continue
+                    for action_request in action_requests:
+                        action_name = action_request.get("name")
 
-                    if session_state.auto_approve:
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
+                        if session_state.auto_approve:
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
 
-                        description = action_request.get("description", "tool action")
-                        console.print()
-                        console.print(f"  [dim]⚡ {description}[/dim]")
+                            description = action_request.get("description", "tool action")
+                            console.print()
+                            console.print(f"  [dim]⚡ {description}[/dim]")
 
-                        decisions.append({"type": "approve"})
+                            decisions.append({"type": "approve"})
 
-                        if not spinner_active:
-                            status.start()
-                            spinner_active = True
-                    else:
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
+                            if not spinner_active:
+                                status.start()
+                                spinner_active = True
+                        else:
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
 
-                        decision = await asyncio.to_thread(
-                            prompt_for_tool_approval,
-                            action_request,
-                            assistant_id,
-                        )
-                        decisions.append(decision)
+                            decision = await asyncio.to_thread(
+                                prompt_for_tool_approval,
+                                action_request,
+                                assistant_id,
+                            )
+                            decisions.append(decision)
 
                 # Suppress output if any action was rejected
-                suppress_resumed_output = any(d.get("type") == "reject" for d in decisions)
+                # For handoff decisions, check "approved" key; for tool approvals, check "type"
+                suppress_resumed_output = any(
+                    d.get("type") == "reject" or d.get("approved") == False for d in decisions
+                )
 
-                hitl_response = {"decisions": decisions}
+                # Format resume data based on what type of interrupt occurred
+                if hitl_request and hitl_request.get("action") == "approve_handoff":
+                    # HandoffApprovalMiddleware expects simple {"approved": bool} format
+                    hitl_response = decisions[0] if decisions else {"approved": False}
+                else:
+                    # Other HITL actions (tool approvals) expect {"decisions": [...]} format
+                    hitl_response = {"decisions": decisions}
 
             if interrupt_occurred and hitl_response:
                 if suppress_resumed_output:

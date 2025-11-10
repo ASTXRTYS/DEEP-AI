@@ -543,7 +543,7 @@ async def execute_task(
                     hitl_request = None
 
                 decisions = []
-                # Check for new simplified handoff schema (from refactored HandoffApprovalMiddleware)
+                # Check for handoff approval interrupt (from HandoffApprovalMiddleware)
                 if hitl_request and hitl_request.get("action") == "approve_handoff":
                     # Import handoff UI
                     from .handoff_ui import HandoffProposal, prompt_handoff_decision
@@ -552,29 +552,30 @@ async def execute_task(
                         status.stop()
                         spinner_active = False
 
-                    # New simplified schema: payload is flat dict, not nested
+                    # Build proposal from interrupt payload
                     proposal = HandoffProposal(
                         handoff_id=hitl_request.get("handoff_id", ""),
                         summary_json=hitl_request.get("summary_json", {}),
-                        summary_md=hitl_request.get("summary", ""),  # "summary" key in new schema
+                        summary_md=hitl_request.get("summary", ""),  # "summary" key in interrupt payload
                         parent_thread_id=hitl_request.get("parent_thread_id", ""),
                         assistant_id=hitl_request.get("assistant_id", ""),
                     )
+
+                    # Get user decision (approve/refine/reject)
                     decision_result = await asyncio.to_thread(
                         prompt_handoff_decision,
                         proposal,
-                        preview_only=False,  # Not in simplified schema
+                        preview_only=False,
                     )
 
-                    # Add decision in simplified format (HandoffApprovalMiddleware expects "approved" key)
-                    decisions.append({
-                        "approved": decision_result.status == "accepted",
-                        "summary_md": decision_result.summary_md,
-                        "summary_json": decision_result.summary_json,
-                    })
+                    # Build resume data in format HandoffApprovalMiddleware expects
+                    if decision_result.type == "approve":
+                        # User approved - send approval to middleware
+                        decisions.append({
+                            "type": "approve",
+                        })
 
-                    # If accepted, prepare handoff but DON'T switch yet
-                    if decision_result.status == "accepted":
+                        # Prepare handoff but DON'T switch thread yet
                         try:
                             from deepagents_cli.handoff_persistence import apply_handoff_acceptance
                             from deepagents.middleware.handoff_summarization import HandoffSummary
@@ -600,13 +601,31 @@ async def execute_task(
                             console.print(f"[green]✓ Handoff approved. Processing...[/green]")
                             console.print()
 
-                            # Don't return here - must continue to line 667 where Command(resume=...)
+                            # Don't return here - must continue to where Command(resume=...)
                             # is sent to deliver the approval decision to the middleware.
                             # Thread switching will happen in main.py after execute_task() completes.
 
                         except Exception:  # pragma: no cover - defensive
                             # Non-fatal persistence errors shouldn't crash the run
                             pass
+
+                    elif decision_result.type == "refine":
+                        # User wants refinement - send feedback to middleware
+                        # Middleware will regenerate and interrupt again with new summary
+                        decisions.append({
+                            "type": "refine",
+                            "feedback": decision_result.feedback or "",
+                        })
+                        console.print()
+                        console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
+                        console.print()
+
+                    else:  # reject
+                        # User rejected - send rejection to middleware
+                        decisions.append({
+                            "type": "reject",
+                            "message": "User declined handoff",
+                        })
 
                 # Handle other HITL actions (tool approvals) with legacy schema
                 else:
@@ -643,16 +662,16 @@ async def execute_task(
                             )
                             decisions.append(decision)
 
-                # Suppress output if any action was rejected
-                # For handoff decisions, check "approved" key; for tool approvals, check "type"
+                # Suppress output if any action was rejected (but NOT for refine - that continues the loop)
+                # For handoff decisions, check "type"; for tool approvals, check "type"
                 suppress_resumed_output = any(
-                    d.get("type") == "reject" or d.get("approved") == False for d in decisions
+                    d.get("type") == "reject" for d in decisions
                 )
 
                 # Format resume data based on what type of interrupt occurred
                 if hitl_request and hitl_request.get("action") == "approve_handoff":
-                    # HandoffApprovalMiddleware expects simple {"approved": bool} format
-                    hitl_response = decisions[0] if decisions else {"approved": False}
+                    # HandoffApprovalMiddleware expects: {"type": "approve|refine|reject", "feedback": "..."}
+                    hitl_response = decisions[0] if decisions else {"type": "reject"}
                 else:
                     # Other HITL actions (tool approvals) expect {"decisions": [...]} format
                     hitl_response = {"decisions": decisions}
@@ -736,6 +755,36 @@ async def execute_task(
                     )
                 except Exception:  # pragma: no cover - defensive
                     pass
+
+    # Check for handoff cleanup flag and clear summary block if needed
+    if session_state and session_state.thread_manager and thread_id:
+        try:
+            # Get final state to check for cleanup flag
+            final_state = await agent.aget_state(config)
+            if final_state and final_state.values.get("_handoff_cleanup_pending"):
+                # Clear the summary block from agent.md
+                from deepagents_cli.handoff_persistence import clear_summary_block_file
+                from datetime import datetime, timezone
+
+                agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
+                clear_summary_block_file(agent_md_path)
+
+                # Update thread metadata to mark cleanup as complete
+                # Get existing handoff metadata and update only cleanup fields
+                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
+                if thread_meta and "handoff" in thread_meta.get("metadata", {}):
+                    existing_handoff = thread_meta["metadata"]["handoff"]
+                    updated_handoff = existing_handoff | {
+                        "pending": False,
+                        "cleanup_required": False,
+                        "last_cleanup_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    session_state.thread_manager.update_thread_metadata(
+                        thread_id,
+                        {"handoff": updated_handoff},
+                    )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     # Touch the thread so cleanup/TTL logic sees recent activity
     if session_state and session_state.thread_manager and thread_id:

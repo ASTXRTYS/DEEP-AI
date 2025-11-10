@@ -235,7 +235,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         HandoffToolMiddleware(),              # Provides request_handoff tool (no after_model hook)
 
         # Listed in REVERSE of execution order for after_model():
-        HandoffApprovalMiddleware(),          # after_model() executes SECOND (reads proposal, interrupts)
+        HandoffApprovalMiddleware(model=model),  # after_model() executes SECOND (reads proposal, interrupts, refines)
         HandoffSummarizationMiddleware(model=model),  # after_model() executes FIRST (generates proposal)
 
         HandoffCleanupMiddleware(),           # after_agent() hook for cleanup

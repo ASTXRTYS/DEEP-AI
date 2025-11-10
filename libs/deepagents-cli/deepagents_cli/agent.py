@@ -222,12 +222,17 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
     )
 
     # Use the same backend for agent memory middleware
+    # Issue #1: Add HandoffApprovalMiddleware to stack (runs after summarization)
+    from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
+    from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
+
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
         HandoffToolMiddleware(),  # Provides request_handoff tool
+        HandoffSummarizationMiddleware(model=model),  # Generates summary (Issue #1: NO interrupt here)
+        HandoffApprovalMiddleware(),  # Emits HITL interrupt (Issue #1: Separation of concerns)
         HandoffCleanupMiddleware(),  # Auto-cleanup after first turn
-        # NOTE: HandoffSummarizationMiddleware and HandoffApprovalMiddleware are added in graph.py
     ]
 
     # Get the system prompt

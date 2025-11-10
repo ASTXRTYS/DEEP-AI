@@ -19,10 +19,12 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.runtime import Runtime
 
-MAX_PROMPT_TOKENS = 4000
-MAX_SUMMARY_OUTPUT_TOKENS = 200
-MAX_MESSAGES_TO_SCORE = 120
-MAX_TOOL_PAIR_LOOKBACK = 25
+# Summarization configuration constants
+# Based on Claude Sonnet 4 context window and typical conversation patterns
+MAX_PROMPT_TOKENS = 4000  # Leave room for system prompt + summary generation prompt
+MAX_SUMMARY_OUTPUT_TOKENS = 200  # Concise summaries (3-5 bullet points typical)
+MAX_MESSAGES_TO_SCORE = 120  # Scan last ~120 messages for relevance scoring
+MAX_TOOL_PAIR_LOOKBACK = 25  # Search up to 25 messages back for orphaned tool pairs
 
 
 @dataclass
@@ -159,10 +161,28 @@ def generate_handoff_summary(
     assistant_id: str,
     parent_thread_id: str,
 ) -> HandoffSummary:
-    """Generate a structured handoff summary for the provided message history."""
+    """Generate a structured handoff summary for the provided message history.
+
+    Pattern Reference: Adapted from LangChain SummarizationMiddleware
+    https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/middleware/summarization.py
+
+    Args:
+        model: LLM to use for summary generation
+        messages: Conversation history to summarize
+        assistant_id: ID of the current assistant
+        parent_thread_id: Thread ID being handed off from
+
+    Returns:
+        HandoffSummary with structured JSON and markdown representations
+
+    Raises:
+        ValueError: If LLM invocation fails after retries
+    """
 
     from uuid import uuid4
+    import logging
 
+    logger = logging.getLogger(__name__)
     llm = _ensure_model(model)
 
     selected = select_messages_for_summary(messages)
@@ -171,10 +191,27 @@ def generate_handoff_summary(
 
     from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 
-    response = llm.invoke(
-        DEFAULT_SUMMARY_PROMPT.format(messages=prompt_messages),
-        max_tokens=MAX_SUMMARY_OUTPUT_TOKENS,
-    )
+    # Add retry logic for LLM calls (Issue #3)
+    max_retries = 2
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = llm.invoke(
+                DEFAULT_SUMMARY_PROMPT.format(messages=prompt_messages),
+                max_tokens=MAX_SUMMARY_OUTPUT_TOKENS,
+            )
+            break  # Success, exit retry loop
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"LLM invocation failed (attempt {attempt + 1}/{max_retries + 1}): {e}"
+            )
+            if attempt == max_retries:
+                # Final attempt failed, raise with context
+                raise ValueError(
+                    f"Failed to generate handoff summary after {max_retries + 1} attempts"
+                ) from e
 
     raw_content = getattr(response, "content", "")
     if isinstance(raw_content, list):
@@ -217,19 +254,26 @@ def generate_handoff_summary(
 class HandoffSummarizationMiddleware(AgentMiddleware):
     """Generate handoff summaries when request_handoff tool is called.
 
-    This middleware listens for the request_handoff tool call and generates
-    a structured summary of the conversation. The summary is placed in state
-    for the approval middleware to present to the user.
+    Pattern Reference: Follows LangChain middleware pattern of separation of concerns.
+    This middleware generates summaries, HandoffApprovalMiddleware handles HITL approval.
+    https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/add-human-in-the-loop/
 
-    Uses before_model hook to ensure summary is generated BEFORE the model
-    sees it in the next turn.
+    This middleware:
+    1. Detects request_handoff tool calls
+    2. Generates structured summary using LLM
+    3. Places summary in state for HandoffApprovalMiddleware to present
+
+    State Keys (Issue #4):
+    - _handoff_proposal: Internal state, summary awaiting approval
+    - handoff_decision: Public API, final decision from user
+    - handoff_approved: Public API, boolean approval status
     """
 
     def __init__(self, model: BaseChatModel | str) -> None:
         """Initialize summarization middleware.
 
         Args:
-            model: Model to use for generating summaries
+            model: Model to use for generating summaries (Claude Sonnet 4 recommended)
         """
         super().__init__()
         self.model = _ensure_model(model)
@@ -237,22 +281,27 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Generate summary after model proposes handoff tool call.
 
-        Runs in after_model to ensure tool call is detected in the same phase
-        as HandoffToolMiddleware sets the state flag.
+        Pattern Reference: Generation-only, no interrupt(). HandoffApprovalMiddleware
+        handles HITL approval using interrupt() per LangChain v1 pattern.
+        https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/add-human-in-the-loop/
 
         Args:
             state: Current agent state
             runtime: Runtime context
 
         Returns:
-            State update with handoff_proposal, or None if no handoff requested
+            State update with _handoff_proposal, or None if no handoff requested
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         # Check if handoff was requested
         if not self._handoff_requested(state):
             return None
-        
+
         # Skip if proposal already generated (prevent duplicate summaries)
-        if state.get("handoff_proposal"):
+        if state.get("_handoff_proposal"):
             return None
 
         # Extract metadata
@@ -264,14 +313,23 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         parent_thread_id = configurable.get("thread_id") or metadata.get("thread_id") or "unknown"
         preview_only = metadata.get("handoff_preview_only", False)
 
-        # Generate summary using helper function
+        # Generate summary using helper function with error handling
         messages = state.get("messages") or []
-        summary = generate_handoff_summary(
-            model=self.model,
-            messages=messages,
-            assistant_id=assistant_id,
-            parent_thread_id=parent_thread_id,
-        )
+        try:
+            summary = generate_handoff_summary(
+                model=self.model,
+                messages=messages,
+                assistant_id=assistant_id,
+                parent_thread_id=parent_thread_id,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate handoff summary: {e}")
+            # Return error state instead of crashing
+            return {
+                "_handoff_proposal": None,
+                "handoff_decision": {"type": "error", "error": str(e)},
+                "handoff_approved": False,
+            }
 
         # Build proposal dict with only serializable types
         proposal = {
@@ -282,34 +340,10 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             "parent_thread_id": str(parent_thread_id),
             "preview_only": bool(preview_only),
         }
-        
-        # Import interrupt here to avoid circular deps
-        from langgraph.types import interrupt
-        
-        # Emit interrupt with summary for approval
-        interrupt_payload = {
-            "schema_version": 1,
-            "middleware_source": "HandoffSummarizationMiddleware",
-            "action_requests": [{
-                "name": "handoff_summary",
-                "description": "Preview handoff summary for approval",
-                "args": proposal,
-            }]
-        }
-        
-        # Wait for human decision
-        resume_data = interrupt(interrupt_payload)
-        
-        # Extract decision
-        decisions = resume_data.get("decisions", []) if isinstance(resume_data, dict) else []
-        user_decision = decisions[0] if decisions else {"type": "reject"}
-        
-        # Return decision in state
-        return {
-            "handoff_proposal": None,  # Clear after approval
-            "handoff_decision": dict(user_decision),  # Ensure plain dict
-            "handoff_approved": user_decision.get("type") == "approve",
-        }
+
+        # Return proposal in state for HandoffApprovalMiddleware to present
+        # (Issue #1: NO interrupt() here - that's HandoffApprovalMiddleware's job)
+        return {"_handoff_proposal": proposal}
 
     def _handoff_requested(self, state: AgentState) -> bool:
         """Check if handoff was requested via tool call or state flag.

@@ -340,15 +340,16 @@ async def execute_task(
                                 console.print()
                         
                         # Check for handoff approval pending in chunk_data OR in any nested dict
-                        proposal = chunk_data.get("handoff_proposal")
+                        # Issue #4: Updated to use _handoff_proposal (underscore prefix for internal state)
+                        proposal = chunk_data.get("_handoff_proposal")
                         approval_pending = chunk_data.get("handoff_approval_pending")
-                        
+
                         # Also check the raw data dict itself
                         if not proposal:
                             for v in data.values():
                                 if isinstance(v, dict):
-                                    if "handoff_proposal" in v:
-                                        proposal = v["handoff_proposal"]
+                                    if "_handoff_proposal" in v:
+                                        proposal = v["_handoff_proposal"]
                                     if "handoff_approval_pending" in v:
                                         approval_pending = v["handoff_approval_pending"]
                         

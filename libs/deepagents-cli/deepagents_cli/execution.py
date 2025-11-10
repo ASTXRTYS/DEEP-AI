@@ -3,8 +3,6 @@
 import asyncio
 import json
 import sys
-import termios
-import tty
 from datetime import UTC, datetime
 from typing import Any
 

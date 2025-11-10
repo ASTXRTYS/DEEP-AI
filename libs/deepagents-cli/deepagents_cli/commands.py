@@ -495,46 +495,7 @@ async def _select_thread_interactively(threads, current_thread_id: str | None) -
     return await _select_thread_with_questionary(threads, current_thread_id)
 
 
-def _select_thread_fallback(threads, current_thread_id: str | None) -> str | None:
-    """Fallback selection that works without raw TTY capabilities."""
-    console.print()
-    console.print("Select a thread:")
-
-    default_index = 0
-    if current_thread_id:
-        for idx, thread in enumerate(threads):
-            if thread["id"] == current_thread_id:
-                default_index = idx
-                break
-
-    for idx, thread in enumerate(threads, start=1):
-        summary = _format_thread_summary(thread, current_thread_id)
-        selector = "*" if idx - 1 == default_index else " "
-        console.print(f"  [{selector}] {idx}. {summary}")
-
-    console.print()
-    prompt = f"Choice (1-{len(threads)}; Enter to cancel) [default={default_index + 1}]: "
-    try:
-        choice = input(prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        return None
-
-    if not choice:
-        return threads[default_index]["id"]
-
-    if not choice.isdigit():
-        console.print(f"[red]Invalid selection: {choice}[/red]")
-        console.print()
-        return None
-
-    selected_idx = int(choice) - 1
-    if selected_idx < 0 or selected_idx >= len(threads):
-        console.print(f"[red]Selection out of range: {choice}[/red]")
-        console.print()
-        return None
-
-    return threads[selected_idx]["id"]
+# Removed _select_thread_fallback - no longer needed after questionary migration
 
 
 async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool:

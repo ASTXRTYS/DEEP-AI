@@ -231,6 +231,22 @@ def fork_thread_on_server(thread_id: str, server_url: str | None = None) -> str:
     return response.json()["thread_id"]
 
 
+def delete_thread_on_server(thread_id: str, server_url: str | None = None) -> None:
+    """Delete a thread on LangGraph server.
+
+    Deletes the thread and all associated checkpoints via the server API.
+    Deletion cascades automatically on the server side.
+
+    Args:
+        thread_id: Thread ID to delete
+        server_url: Optional server URL, defaults to get_server_url()
+
+    Raises:
+        LangGraphError: If server request fails or times out
+    """
+    _request("DELETE", f"/threads/{thread_id}", server_url=server_url)
+
+
 def start_server_if_needed() -> tuple[bool, str | None]:
     """Start LangGraph dev server if not already running.
 

@@ -318,8 +318,19 @@ class ThreadManager:
                 raise ValueError(msg)
             thread["name"] = new_name
 
-    def delete_thread(self, thread_id: str, agent: CompiledGraph) -> None:
-        """Delete a thread and its checkpoints."""
+    def delete_thread(self, thread_id: str, agent: CompiledGraph | None = None) -> None:
+        """Delete a thread and its checkpoints via server API.
+
+        Args:
+            thread_id: Thread ID to delete
+            agent: Agent instance (optional, only used for local fallback)
+
+        Raises:
+            ValueError: If trying to delete current thread or thread not found
+            LangGraphError: If server request fails
+        """
+        from .server_client import delete_thread_on_server, is_server_available, LangGraphError
+
         current_id = self.get_current_thread_id()
         if thread_id == current_id:
             msg = (
@@ -335,12 +346,24 @@ class ThreadManager:
             msg = f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
             raise ValueError(msg)
 
-        try:
-            agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
-        except AttributeError:
-            # Checkpointer may not expose delete_thread (e.g., remote deployments)
-            pass
+        # Delete via server API (primary method)
+        if is_server_available():
+            try:
+                delete_thread_on_server(thread_id)
+            except LangGraphError as e:
+                msg = f"Failed to delete thread on server: {e}"
+                raise ValueError(msg) from e
+        else:
+            # Server not available - try local deletion as fallback
+            if agent:
+                try:
+                    agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
+                except AttributeError:
+                    # Checkpointer may not expose delete_thread
+                    pass
+            # If no agent provided or checkpointer doesn't support deletion, metadata removal is enough
 
+        # Update local metadata
         with self.store.edit() as editable:
             editable.threads = [t for t in editable.threads if t["id"] != thread_id]
             if editable.current_thread_id == thread_id:

@@ -132,26 +132,50 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         if "_refinement_cache" not in proposal:
             proposal["_refinement_cache"] = []
             proposal["_refinement_iteration"] = 0
+            proposal["_refinement_waiting_for_resume"] = False
+
+        proposal.setdefault("_refinement_waiting_for_resume", False)
+
+        refinement_cache = proposal["_refinement_cache"]
 
         # Start with original summary or last cached iteration
         iteration = proposal["_refinement_iteration"]
-        if iteration < len(proposal["_refinement_cache"]):
-            current_summary = proposal["_refinement_cache"][iteration]
+        cache_hit = iteration < len(refinement_cache)
+        if cache_hit:
+            current_summary = refinement_cache[iteration]
         else:
             current_summary = proposal.get("summary_md", "")
 
         while True:
-            # Build interrupt payload with current summary
+            # Refresh iteration to ensure metadata matches current state
+            iteration = proposal["_refinement_iteration"]
+            is_replay = bool(proposal.get("_refinement_waiting_for_resume", False))
+
+            interrupt_metadata = {
+                "iteration": iteration,
+                "is_replay": is_replay,
+                "cache_hit": cache_hit,
+                "refinement_count": len(refinement_cache),
+            }
+
+            # Build interrupt payload with current summary and observability metadata
             interrupt_payload = {
                 "action": "approve_handoff",
                 "summary": current_summary,
                 "handoff_id": proposal.get("handoff_id", ""),
                 "assistant_id": proposal.get("assistant_id", ""),
                 "parent_thread_id": proposal.get("parent_thread_id", ""),
+                "metadata": interrupt_metadata,
             }
+
+            # Mark that we're awaiting resume so replays can be detected
+            proposal["_refinement_waiting_for_resume"] = True
 
             # Wait for user decision - interrupt() returns resume data
             resume_data = interrupt(interrupt_payload)
+
+            # Reset replay flag once resume data has been received
+            proposal["_refinement_waiting_for_resume"] = False
 
             # Validate resume data
             if not isinstance(resume_data, dict):
@@ -198,9 +222,10 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                 proposal["_refinement_iteration"] = iteration
 
                 # Check cache before calling LLM (optimization for replays)
-                if iteration < len(proposal["_refinement_cache"]):
+                if iteration < len(refinement_cache):
                     # Use cached summary from previous execution
-                    current_summary = proposal["_refinement_cache"][iteration]
+                    current_summary = refinement_cache[iteration]
+                    cache_hit = True
                     logger.info(f"Using cached summary for iteration {iteration}")
                 else:
                     # Generate new summary and cache it
@@ -213,7 +238,8 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                             messages=state.get("messages", []),
                         )
                         # Cache the new summary for future replays
-                        proposal["_refinement_cache"].append(current_summary)
+                        refinement_cache.append(current_summary)
+                        cache_hit = False
                         logger.info(f"Cached new summary for iteration {iteration}")
                     except Exception as e:
                         logger.error(f"Failed to regenerate summary: {e}")

@@ -221,14 +221,44 @@ async def execute_task(
     if session_state and session_state.thread_manager:
         thread_id = session_state.thread_manager.get_current_thread_id()
 
-    config_metadata = {"thread_id": thread_id}
-    if assistant_id:
-        config_metadata["assistant_id"] = assistant_id
+    config_configurable = {"thread_id": thread_id}
 
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "metadata": config_metadata,
-    }
+    handoff_trace_metadata: dict[str, Any] | None = None
+
+    def base_run_metadata() -> dict[str, Any]:
+        """Capture latest thread metadata for runtime config."""
+        metadata: dict[str, Any] = {"thread_id": thread_id}
+        if assistant_id:
+            metadata["assistant_id"] = assistant_id
+
+        if session_state and session_state.thread_manager:
+            try:
+                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
+            except Exception:
+                thread_meta = None
+
+            if thread_meta:
+                # Surface thread-level metadata for middleware (e.g., handoff flags)
+                thread_meta_block = dict(thread_meta.get("metadata") or {})
+                if thread_meta_block:
+                    metadata["thread_metadata"] = thread_meta_block
+                    handoff_block = thread_meta_block.get("handoff")
+                    if handoff_block:
+                        metadata["handoff"] = handoff_block
+                if name := thread_meta.get("name"):
+                    metadata["thread_name"] = name
+
+        return metadata
+
+    def build_run_config(*, with_trace_metadata: bool = True) -> dict[str, Any]:
+        """Compose per-run config metadata for LangSmith tracing."""
+        metadata = base_run_metadata()
+        if with_trace_metadata and handoff_trace_metadata:
+            metadata.update(handoff_trace_metadata)
+        return {
+            "configurable": config_configurable,
+            "metadata": metadata,
+        }
 
     has_responded = False
     captured_input_tokens = 0
@@ -287,6 +317,7 @@ async def execute_task(
 
     try:
         while True:
+            current_config = build_run_config()
             interrupt_occurred = False
             hitl_response = None
             suppress_resumed_output = False
@@ -296,7 +327,7 @@ async def execute_task(
                 stream_input,
                 stream_mode=["messages", "updates"],  # Dual-mode for HITL support
                 subgraphs=True,
-                config=config,
+                config=current_config,
                 durability="exit",
             ):
                 # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
@@ -537,6 +568,7 @@ async def execute_task(
 
             # Handle human-in-the-loop after stream completes
             if interrupt_occurred and hitl_request:
+                handoff_trace_metadata = None
                 # hitl_request is already unwrapped by _unwrap_interrupt()
                 # but double-check it's a valid dict
                 if not isinstance(hitl_request, dict):
@@ -547,6 +579,10 @@ async def execute_task(
                 if hitl_request and hitl_request.get("action") == "approve_handoff":
                     # Import handoff UI
                     from .handoff_ui import HandoffProposal, prompt_handoff_decision
+
+                    payload_metadata = hitl_request.get("metadata")
+                    if isinstance(payload_metadata, dict):
+                        handoff_trace_metadata = payload_metadata.copy()
 
                     if spinner_active:
                         status.stop()
@@ -691,6 +727,7 @@ async def execute_task(
                 stream_input = Command(resume=hitl_response)
                 # Continue the while loop to restream
             else:
+                handoff_trace_metadata = None
                 break
 
     except asyncio.CancelledError:
@@ -702,7 +739,7 @@ async def execute_task(
 
         try:
             await agent.aupdate_state(
-                config=config,
+                config=build_run_config(with_trace_metadata=False),
                 values={
                     "messages": [
                         HumanMessage(content="[The previous request was cancelled by the system]")
@@ -725,7 +762,7 @@ async def execute_task(
         # Inform the agent synchronously (in async context)
         try:
             await agent.aupdate_state(
-                config=config,
+                config=build_run_config(with_trace_metadata=False),
                 values={
                     "messages": [
                         HumanMessage(content="[User interrupted the previous request with Ctrl+C]")
@@ -760,7 +797,7 @@ async def execute_task(
     if session_state and session_state.thread_manager and thread_id:
         try:
             # Get final state to check for cleanup flag
-            final_state = await agent.aget_state(config)
+            final_state = await agent.aget_state(build_run_config(with_trace_metadata=False))
             if final_state and final_state.values.get("_handoff_cleanup_pending"):
                 # Clear the summary block from agent.md
                 from deepagents_cli.handoff_persistence import clear_summary_block_file

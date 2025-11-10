@@ -22,7 +22,7 @@ You are working with a senior engineer who:
 
 ---
 
-## 🔬 Your Research Workflow (MANDATORY)
+## 🔬 Your Research Workflow (MANDATORY) NON-NEGOTIABLE
 
 **CORE PRINCIPLE:** Understand what you need to build, then research those specific needs.
 

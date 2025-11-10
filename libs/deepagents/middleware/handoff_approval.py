@@ -12,14 +12,26 @@ Key Principles:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+from typing_extensions import NotRequired
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 
-class HandoffApprovalMiddleware(AgentMiddleware):
+class HandoffState(AgentState):
+    """Extended state schema for handoff middleware.
+
+    Includes internal coordination fields for handoff proposal and approval flow.
+    """
+    _handoff_proposal: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
+    handoff_decision: NotRequired[dict[str, Any] | None]
+    handoff_approved: NotRequired[bool]
+
+
+class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
     """Middleware that emits interrupts for handoff approval.
 
     Pattern Reference: Separation of concerns - HandoffSummarizationMiddleware
@@ -33,12 +45,26 @@ class HandoffApprovalMiddleware(AgentMiddleware):
     4. Updates state with final decision
     """
 
+    state_schema = HandoffState
+
     def __init__(self) -> None:
         """Initialize approval middleware."""
         super().__init__()
 
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Emit interrupt for handoff approval.
+
+        EXECUTION MODEL (CRITICAL):
+        This node re-executes twice per interrupt due to LangGraph's interrupt semantics:
+
+        1. First execution: Code runs until interrupt() raises GraphInterrupt exception.
+           State is checkpointed. Execution halts.
+
+        2. Second execution (after resume): Node re-executes FROM LINE 1. This time,
+           interrupt() returns the resume value instead of raising an exception.
+           Code continues past interrupt() and returns state updates.
+
+        Implication: All code before interrupt() must be idempotent (safe to run twice).
 
         Pattern Reference: Uses interrupt() per LangChain v1 HITL pattern
         https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/add-human-in-the-loop/#approve-or-reject

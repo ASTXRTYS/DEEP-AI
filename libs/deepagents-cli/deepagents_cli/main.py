@@ -178,6 +178,15 @@ async def simple_cli(
 
         await execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
+        # Check if handoff was approved and needs thread switch
+        if session_state.pending_handoff_child_id:
+            child_id = session_state.pending_handoff_child_id
+            session_state.thread_manager.switch_thread(child_id)
+            session_state.pending_handoff_child_id = None  # Clear flag
+            console.print()
+            console.print(f"[green]✓ Switched to new thread: {child_id}[/green]")
+            console.print()
+
 
 async def main(assistant_id: str, session_state) -> None:
     """Main entry point."""

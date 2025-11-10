@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import re
-from typing import Any, Iterable, Sequence
+from typing import Annotated, Any, Iterable, Sequence
+from typing_extensions import NotRequired
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -25,6 +26,16 @@ MAX_PROMPT_TOKENS = 4000  # Leave room for system prompt + summary generation pr
 MAX_SUMMARY_OUTPUT_TOKENS = 200  # Concise summaries (3-5 bullet points typical)
 MAX_MESSAGES_TO_SCORE = 120  # Scan last ~120 messages for relevance scoring
 MAX_TOOL_PAIR_LOOKBACK = 25  # Search up to 25 messages back for orphaned tool pairs
+
+
+class HandoffState(AgentState):
+    """Extended state schema for handoff middleware.
+
+    Includes internal coordination fields for handoff proposal and approval flow.
+    """
+    _handoff_proposal: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
+    handoff_decision: NotRequired[dict[str, Any] | None]
+    handoff_approved: NotRequired[bool]
 
 
 @dataclass
@@ -251,7 +262,7 @@ def generate_handoff_summary(
     return HandoffSummary(handoff_id=handoff_id, summary_json=summary_json, summary_md=summary_md)
 
 
-class HandoffSummarizationMiddleware(AgentMiddleware):
+class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
     """Generate handoff summaries when request_handoff tool is called.
 
     Pattern Reference: Follows LangChain middleware pattern of separation of concerns.
@@ -268,6 +279,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
     - handoff_decision: Public API, final decision from user
     - handoff_approved: Public API, boolean approval status
     """
+
+    state_schema = HandoffState
 
     def __init__(self, model: BaseChatModel | str) -> None:
         """Initialize summarization middleware.
@@ -368,9 +381,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         # Check for tool calls in AIMessage
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             for tc in last_msg.tool_calls:
-                # Handle both dict and object formats
-                tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-                if tool_name == "request_handoff":
+                # Tool calls are standardized dicts in LangChain v1
+                if tc["name"] == "request_handoff":
                     return True
 
         return False

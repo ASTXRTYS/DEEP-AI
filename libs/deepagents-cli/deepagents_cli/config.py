@@ -77,6 +77,7 @@ class SessionState:
         self.auto_approve = auto_approve
         self.thread_manager = thread_manager
         self.model = None
+        self.pending_handoff_child_id: str | None = None  # Deferred handoff target
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

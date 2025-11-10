@@ -11,6 +11,8 @@ from deepagents.middleware import (
     HandoffCleanupMiddleware,
     HandoffToolMiddleware,
 )
+from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
+from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -221,18 +223,22 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         default=FilesystemBackend(), routes={"/memories/": long_term_backend}
     )
 
-    # Use the same backend for agent memory middleware
-    # Issue #1: Add HandoffApprovalMiddleware to stack (runs after summarization)
-    from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
-    from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
-
+    # Custom middleware for CLI-specific features
+    # CRITICAL: after_model() hooks execute in REVERSE order (last-to-first)
+    # The middleware listed LAST will have its after_model() execute FIRST
+    # Reference: https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L1395-1410
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
-        HandoffToolMiddleware(),  # Provides request_handoff tool
-        HandoffSummarizationMiddleware(model=model),  # Generates summary (Issue #1: NO interrupt here)
-        HandoffApprovalMiddleware(),  # Emits HITL interrupt (Issue #1: Separation of concerns)
-        HandoffCleanupMiddleware(),  # Auto-cleanup after first turn
+
+        # Handoff middleware stack (order matters for after_model execution!)
+        HandoffToolMiddleware(),              # Provides request_handoff tool (no after_model hook)
+
+        # Listed in REVERSE of execution order for after_model():
+        HandoffApprovalMiddleware(),          # after_model() executes SECOND (reads proposal, interrupts)
+        HandoffSummarizationMiddleware(model=model),  # after_model() executes FIRST (generates proposal)
+
+        HandoffCleanupMiddleware(),           # after_agent() hook for cleanup
     ]
 
     # Get the system prompt

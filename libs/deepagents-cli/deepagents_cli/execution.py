@@ -573,7 +573,7 @@ async def execute_task(
                         "summary_json": decision_result.summary_json,
                     })
 
-                    # If accepted, persist and switch threads now
+                    # If accepted, prepare handoff but DON'T switch yet
                     if decision_result.status == "accepted":
                         try:
                             from deepagents_cli.handoff_persistence import apply_handoff_acceptance
@@ -594,11 +594,16 @@ async def execute_task(
                                 parent_thread_id=parent_thread_id,
                             )
 
-                            # Switch to child thread
-                            session_state.thread_manager.switch_thread(child_id)
+                            # Store child_id for deferred switching (AFTER stream completes)
+                            session_state.pending_handoff_child_id = child_id
                             console.print()
-                            console.print(f"[green]✓ Handoff complete. Switched to thread: {child_id}[/green]")
+                            console.print(f"[green]✓ Handoff approved. Processing...[/green]")
                             console.print()
+
+                            # Don't return here - must continue to line 667 where Command(resume=...)
+                            # is sent to deliver the approval decision to the middleware.
+                            # Thread switching will happen in main.py after execute_task() completes.
+
                         except Exception:  # pragma: no cover - defensive
                             # Non-fatal persistence errors shouldn't crash the run
                             pass

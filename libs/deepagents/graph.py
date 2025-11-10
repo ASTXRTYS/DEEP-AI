@@ -9,7 +9,6 @@ from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ResponseFormat
 from langchain_anthropic import ChatAnthropic
-from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.cache.base import BaseCache
@@ -20,6 +19,7 @@ from langgraph.types import Checkpointer
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.filesystem_permission import handle_filesystem_permissions
+from deepagents.middleware.prompt_cache import SafeAnthropicPromptCachingMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
 
@@ -112,7 +112,7 @@ def create_deep_agent(
                     max_tokens_before_summary=170000,
                     messages_to_keep=6,
                 ),
-                AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+                SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                 PatchToolCallsMiddleware(),
             ],
             default_interrupt_on=interrupt_on,
@@ -123,7 +123,7 @@ def create_deep_agent(
             max_tokens_before_summary=170000,
             messages_to_keep=6,
         ),
-        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        SafeAnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
     ]
     if middleware:

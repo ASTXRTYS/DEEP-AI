@@ -79,7 +79,13 @@ class ThreadStoreData:
 
     def clone(self) -> ThreadStoreData:
         """Create a deep copy of the current data structure."""
-        thread_copies = [cast("ThreadMetadata", dict(thread)) for thread in self.threads]
+        thread_copies: list[ThreadMetadata] = []
+        for thread in self.threads:
+            copy = cast("ThreadMetadata", dict(thread))
+            metadata = copy.get("metadata")
+            if isinstance(metadata, dict):
+                copy["metadata"] = dict(metadata)
+            thread_copies.append(copy)
         return ThreadStoreData(
             threads=thread_copies,
             current_thread_id=self.current_thread_id,

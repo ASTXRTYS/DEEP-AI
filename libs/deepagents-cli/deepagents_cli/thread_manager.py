@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from .thread_store import ThreadStore, ThreadStoreCorruptError, ThreadStoreData
 
@@ -24,7 +24,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-class ThreadMetadata(TypedDict):
+class ThreadMetadata(TypedDict, total=False):
     """Metadata for a conversation thread."""
 
     id: str
@@ -34,6 +34,7 @@ class ThreadMetadata(TypedDict):
     parent_id: str | None
     name: str | None
     token_count: int | None  # Current context token count
+    metadata: dict[str, Any] | None
 
 
 @dataclass
@@ -94,6 +95,7 @@ class ThreadManager:
             "parent_id": None,
             "name": "Default conversation",
             "token_count": 0,
+            "metadata": {},
         }
 
         with self.store.edit() as data:
@@ -166,15 +168,23 @@ class ThreadManager:
     # ------------------------------------------------------------------
     # Core operations
     # ------------------------------------------------------------------
-    def create_thread(self, name: str | None = None, parent_id: str | None = None) -> str:
+    def create_thread(
+        self,
+        name: str | None = None,
+        parent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """Create a new thread via the server API."""
         from .server_client import create_thread_on_server
 
         # Create thread on server
-        thread_id = create_thread_on_server(name=name)
+        thread_metadata = dict(metadata or {})
+        if name and "name" not in thread_metadata:
+            thread_metadata["name"] = name
+        thread_id = create_thread_on_server(name=name, metadata=thread_metadata or None)
         now = _now_iso()
 
-        metadata: ThreadMetadata = {
+        thread_info: ThreadMetadata = {
             "id": thread_id,
             "assistant_id": self.assistant_id,
             "created": now,
@@ -182,10 +192,11 @@ class ThreadManager:
             "parent_id": parent_id,
             "name": name,
             "token_count": 0,
+            "metadata": thread_metadata,
         }
 
         with self.store.edit() as data:
-            data.threads.append(metadata)
+            data.threads.append(thread_info)
             data.current_thread_id = thread_id
 
         self.current_thread_id = thread_id
@@ -265,6 +276,7 @@ class ThreadManager:
             "parent_id": source_thread_id,
             "name": fork_name,
             "token_count": source_token_count,  # Inherit from parent
+            "metadata": {},
         }
 
         with self.store.edit() as data:
@@ -284,6 +296,18 @@ class ThreadManager:
         """Return metadata for a specific thread."""
         data = self._safe_load()
         return next((t for t in data.threads if t["id"] == thread_id), None)
+
+    def update_thread_metadata(self, thread_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        """Merge updates into the thread's metadata block and return the result."""
+
+        with self.store.edit() as data:
+            thread = next((thread for thread in data.threads if thread["id"] == thread_id), None)
+            if not thread:
+                msg = f"Thread '{thread_id}' not found."
+                raise ValueError(msg)
+            current = cast("dict[str, Any]", thread.setdefault("metadata", {}))
+            current.update(updates)
+            return dict(current)
 
     def rename_thread(self, thread_id: str, new_name: str) -> None:
         """Rename a thread."""

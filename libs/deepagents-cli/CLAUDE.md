@@ -12,6 +12,47 @@ DeepAgents CLI is an interactive AI coding assistant built on LangGraph with per
 
 ---
 
+## 🔬 MCP Research Workflow (MANDATORY FOR THIS CODEBASE)
+
+**See `/Users/Jason/.claude/CLAUDE.md` for complete MCP workflow details.**
+
+This CLI is built on LangGraph/LangChain with complex middleware patterns. **NEVER guess** based on general knowledge - use the research tools:
+
+### Step 1: DeepWiki Index (PRIMARY - Interconnected Knowledge)
+**Tool:** `mcp__deepwiki__ask_question` with repo `ASTXRTYS/index`
+
+**Why critical for this codebase:**
+- This CLI uses LangGraph execution patterns, LangChain middleware, and DeepAgents extensions
+- The Index contains ALL THREE repos indexed together
+- Questions get answers that understand how these systems interconnect
+
+**Use for:**
+- Middleware execution order and composition
+- Interrupt patterns (HITL, handoff approval, refinement loops)
+- State management and checkpointing
+- How DeepAgents extends base LangChain patterns
+
+### Step 2: LangChain Docs MCP (Verification)
+**Tool:** `mcp__docs-langchain__SearchDocsByLangChain`
+
+**Use for:**
+- API signatures and parameters
+- Official examples
+- Latest method signatures
+
+### The Workflow:
+1. **DeepWiki FIRST** → Architectural understanding
+2. **LangChain Docs** → API verification
+3. **Implement** → With confidence
+4. **Document** → Save to `/Users/Jason/.claude/memories/`
+
+**Example:** Before implementing handoff refinement loop:
+- DeepWiki: "How do interrupt() loops work for iterative refinement?"
+- LangChain Docs: "Verify interrupt() signature and Command usage"
+- Implement based on interconnected knowledge
+
+---
+
 ## Development Commands
 
 ### Installation

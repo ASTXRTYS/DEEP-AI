@@ -18,6 +18,54 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## 🔬 MCP Research Workflow (CRITICAL)
+
+**See `/Users/Jason/.claude/CLAUDE.md` for complete workflow details.**
+
+When working on **ANY code in this repository**, follow this MANDATORY research workflow:
+
+### Step 1: DeepWiki Index - Interconnected Knowledge
+**Tool:** `mcp__deepwiki__ask_question` with repo `ASTXRTYS/index`
+**URL:** https://deepwiki.com/ASTXRTYS/index
+
+**What you're accessing:**
+- Full LangGraph open-source repo (indexed)
+- Full LangChain open-source repo (indexed)
+- Full DeepAgents repo (indexed)
+- **Interconnected knowledge across ALL THREE**
+
+When you ask the Index a question, you get answers that understand how LangGraph + LangChain + DeepAgents work TOGETHER, not isolated documentation from one repo.
+
+**Use this FIRST for:**
+- Middleware architecture and execution patterns
+- Graph execution (interrupts, state, HITL)
+- Understanding how DeepAgents extends LangChain/LangGraph
+- ANY architectural question before implementing
+
+### Step 2: LangChain Docs MCP - Official Documentation
+**Tool:** `mcp__docs-langchain__SearchDocsByLangChain`
+
+**Use this for:**
+- Verifying API signatures (after architectural understanding)
+- Finding specific method parameters
+- Official code examples
+- Latest updates
+
+### Step 3: Document Your Learnings
+**Location:** `/Users/Jason/.claude/memories/`
+
+Save research findings, architectural insights, and patterns discovered. Build on your persistent memory across sessions.
+
+**The Workflow:**
+1. **DeepWiki FIRST** - Get architectural understanding (interconnected knowledge)
+2. **LangChain Docs** - Verify APIs and specifics
+3. **Implement** - With confidence based on research
+4. **Document** - Save learnings to memory
+
+**Never guess** based on general knowledge - LangChain/LangGraph move too fast. Use the tools.
+
+---
+
 ## Git Workflow
 
 ### Remotes

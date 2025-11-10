@@ -3,25 +3,21 @@
 import asyncio
 import logging
 import os
+import shlex
 import subprocess
-import sys  # noqa: F401 - needed for test mocking
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
-
-try:  # POSIX-only modules for raw terminal input
-    import termios
-    import tty
-except ImportError:  # pragma: no cover - exercised indirectly via fallback paths
-    termios = None
-    tty = None
 
 from langsmith import Client
 from requests.exceptions import HTTPError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
+from .execution import execute_task
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
 
@@ -225,6 +221,8 @@ async def _enrich_threads_with_metrics(
     return threads
 
 
+
+
 def _enrich_thread_with_server_data(thread: dict) -> dict:
     """Enrich thread metadata with data from server API.
 
@@ -413,27 +411,64 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
     return True
 
 
-def handle_thread_commands(args: str, thread_manager, agent) -> bool:
-    """Handle /threads subcommands (sync wrapper for event loop safety)."""
-    # Check if we're already in an event loop
-    try:
-        loop = asyncio.get_running_loop()
-        # We're in a running loop - create task in separate thread
-        with ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run, handle_thread_commands_async(args, thread_manager, agent)
-            )
-            return future.result()
-    except RuntimeError:
-        # No running loop - safe to use asyncio.run()
-        return asyncio.run(handle_thread_commands_async(args, thread_manager, agent))
+async def handle_handoff_command(args: str, agent, session_state) -> bool:
+    """Handle /handoff command via tool invocation.
+
+    Args:
+        args: Command arguments (--preview or -p for preview only)
+        agent: The agent instance
+        session_state: Current session state
+
+    Returns:
+        True (command handled)
+    """
+    if not session_state or not session_state.thread_manager:
+        console.print()
+        console.print("[red]Thread manager not available for handoff.[/red]")
+        console.print()
+        return True
+
+    if agent is None:
+        console.print()
+        console.print("[red]Agent is not initialized; cannot run /handoff.[/red]")
+        console.print()
+        return True
+
+    # Parse args
+    preview_only = "--preview" in args or "-p" in args
+
+    # Get current thread info
+    thread_id = session_state.thread_manager.get_current_thread_id()
+    assistant_id = getattr(session_state.thread_manager, "assistant_id", None)
+
+    console.print()
+    console.print(f"[{COLORS['primary']}]Initiating handoff...[/]")
+
+    # Use execute_task to properly handle state-based interrupts via streaming
+    # This follows LangChain v1 best practices for interrupt handling
+    from .execution import execute_task
+
+    user_input = "Please call the request_handoff tool to initiate thread handoff."
+    
+    await execute_task(
+        user_input=user_input,
+        agent=agent,
+        assistant_id=assistant_id,
+        session_state=session_state,
+        token_tracker=None,
+    )
+
+    # The execution loop handles approval UI and persistence when it detects handoff_approval_pending
+    return True
 
 
-def handle_command(
+async def handle_command(
     command: str, agent, token_tracker: TokenTracker, session_state=None
 ) -> str | bool:
     """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
-    command.lower().strip().lstrip("/")
+    command = command.strip()
+    if not command:
+        return False
 
     # Extract command and args
     parts = command.strip().lstrip("/").split(maxsplit=1)
@@ -513,7 +548,10 @@ def handle_command(
             console.print()
             return True
 
-        return handle_thread_commands(args, session_state.thread_manager, agent)
+        return await handle_thread_commands_async(args, session_state.thread_manager, agent)
+
+    if base_cmd == "handoff":
+        return await handle_handoff_command(args, agent, session_state)
 
     console.print()
     console.print(f"[yellow]Unknown command: /{base_cmd}[/yellow]")

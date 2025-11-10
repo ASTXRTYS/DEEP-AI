@@ -8,7 +8,31 @@ Usage:
 """
 
 import os
+import sys
 from pathlib import Path
+
+
+def _ensure_workspace_on_path() -> None:
+    """Ensure monorepo root + libs are available for server imports."""
+
+    current = Path(__file__).resolve()
+    workspace_root = None
+
+    for parent in current.parents:
+        if (parent / "pyproject.toml").exists() and (parent / "libs").exists():
+            workspace_root = parent  # keep walking to capture the outermost workspace
+
+    if workspace_root is None:
+        return
+
+    root_str = str(workspace_root)
+    libs_str = str(workspace_root / "libs")
+    for path in (libs_str, root_str):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+_ensure_workspace_on_path()
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend

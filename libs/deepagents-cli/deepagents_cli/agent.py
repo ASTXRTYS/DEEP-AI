@@ -7,6 +7,12 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware import (
+    HandoffCleanupMiddleware,
+    HandoffToolMiddleware,
+)
+from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
+from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -217,10 +223,22 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         default=FilesystemBackend(), routes={"/memories/": long_term_backend}
     )
 
-    # Use the same backend for agent memory middleware
+    # Custom middleware for CLI-specific features
+    # CRITICAL: after_model() hooks execute in REVERSE order (last-to-first)
+    # The middleware listed LAST will have its after_model() execute FIRST
+    # Reference: https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L1395-1410
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
+
+        # Handoff middleware stack (order matters for after_model execution!)
+        HandoffToolMiddleware(),              # Provides request_handoff tool (no after_model hook)
+
+        # Listed in REVERSE of execution order for after_model():
+        HandoffApprovalMiddleware(model=model),  # after_model() executes SECOND (reads proposal, interrupts, refines)
+        HandoffSummarizationMiddleware(model=model),  # after_model() executes FIRST (generates proposal)
+
+        HandoffCleanupMiddleware(),           # after_agent() hook for cleanup
     ]
 
     # Get the system prompt

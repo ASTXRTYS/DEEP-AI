@@ -43,6 +43,7 @@ COMMANDS = {
     "help": "Show help and available commands",
     "new [name]": "Create a new thread",
     "threads": "Switch threads (interactive)",
+    "handoff": "Summarize current thread and start a child",
     "tokens": "Show token usage statistics",
     "clear": "Clear screen",
     "quit": "Exit",
@@ -75,6 +76,8 @@ class SessionState:
     def __init__(self, auto_approve: bool = False, thread_manager=None) -> None:
         self.auto_approve = auto_approve
         self.thread_manager = thread_manager
+        self.model = None
+        self.pending_handoff_child_id: str | None = None  # Deferred handoff target
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

@@ -5,6 +5,8 @@ import json
 import sys
 import termios
 import tty
+from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
@@ -23,6 +25,36 @@ from .ui import (
     render_file_operation,
     render_todo_list,
 )
+
+
+def _unwrap_interrupt(data: Any) -> dict | None:
+    """Unwrap interrupt payload to extract dict payload.
+
+    LangGraph interrupts can be nested in multiple ways:
+    - As a list: [InterruptObj]
+    - As an object with .value attribute
+    - As a bare dict
+
+    This function safely unwraps to the innermost dict payload.
+
+    Args:
+        data: Raw interrupt data from __interrupt__ field
+
+    Returns:
+        Dict payload if found, None otherwise
+    """
+    # Step 1: Unwrap list/tuple
+    if isinstance(data, (list, tuple)):
+        if not data:
+            return None
+        data = data[0]
+
+    # Step 2: Unwrap .value attribute (may be nested)
+    while hasattr(data, "value") and not isinstance(data, dict):
+        data = data.value
+
+    # Step 3: Validate final payload
+    return data if isinstance(data, dict) else None
 
 
 def _extract_tool_args(action_request: dict) -> dict | None:
@@ -162,7 +194,7 @@ async def execute_task(
     session_state,
     token_tracker: TokenTracker | None = None,
 ) -> None:
-    """Execute any task by passing it directly to the AI agent."""
+    """Execute task with generic interrupt handling (no handoff-specific params)."""
     # Parse file mentions and inject content if any
     prompt_text, mentioned_files = parse_file_mentions(user_input)
 
@@ -189,12 +221,44 @@ async def execute_task(
     if session_state and session_state.thread_manager:
         thread_id = session_state.thread_manager.get_current_thread_id()
 
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "metadata": {"assistant_id": assistant_id, "thread_id": thread_id}
-        if assistant_id
-        else {"thread_id": thread_id},
-    }
+    config_configurable = {"thread_id": thread_id}
+
+    handoff_trace_metadata: dict[str, Any] | None = None
+
+    def base_run_metadata() -> dict[str, Any]:
+        """Capture latest thread metadata for runtime config."""
+        metadata: dict[str, Any] = {"thread_id": thread_id}
+        if assistant_id:
+            metadata["assistant_id"] = assistant_id
+
+        if session_state and session_state.thread_manager:
+            try:
+                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
+            except Exception:
+                thread_meta = None
+
+            if thread_meta:
+                # Surface thread-level metadata for middleware (e.g., handoff flags)
+                thread_meta_block = dict(thread_meta.get("metadata") or {})
+                if thread_meta_block:
+                    metadata["thread_metadata"] = thread_meta_block
+                    handoff_block = thread_meta_block.get("handoff")
+                    if handoff_block:
+                        metadata["handoff"] = handoff_block
+                if name := thread_meta.get("name"):
+                    metadata["thread_name"] = name
+
+        return metadata
+
+    def build_run_config(*, with_trace_metadata: bool = True) -> dict[str, Any]:
+        """Compose per-run config metadata for LangSmith tracing."""
+        metadata = base_run_metadata()
+        if with_trace_metadata and handoff_trace_metadata:
+            metadata.update(handoff_trace_metadata)
+        return {
+            "configurable": config_configurable,
+            "metadata": metadata,
+        }
 
     has_responded = False
     captured_input_tokens = 0
@@ -243,11 +307,17 @@ async def execute_task(
         console.print(markdown, style=COLORS["agent"])
         pending_text = ""
 
+    # Handoff requests now flow through agent middlewares via interrupts.
+    # We still set the config flags above; middlewares will emit an interrupt
+    # which the streaming loop handles. We intentionally avoid any synchronous
+    # summary generation here to ensure proper tracing and UX.
+    
     # Stream input - may need to loop if there are interrupts
     stream_input = {"messages": [{"role": "user", "content": final_input}]}
 
     try:
         while True:
+            current_config = build_run_config()
             interrupt_occurred = False
             hitl_response = None
             suppress_resumed_output = False
@@ -257,7 +327,7 @@ async def execute_task(
                 stream_input,
                 stream_mode=["messages", "updates"],  # Dual-mode for HITL support
                 subgraphs=True,
-                config=config,
+                config=current_config,
                 durability="exit",
             ):
                 # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
@@ -274,21 +344,18 @@ async def execute_task(
                     # Check for interrupts - just capture the data, don't handle yet
                     if "__interrupt__" in data:
                         interrupt_data = data["__interrupt__"]
-                        if interrupt_data:
-                            interrupt_obj = (
-                                interrupt_data[0]
-                                if isinstance(interrupt_data, tuple)
-                                else interrupt_data
-                            )
-                            hitl_request = (
-                                interrupt_obj.value
-                                if hasattr(interrupt_obj, "value")
-                                else interrupt_obj
-                            )
+                        hitl_request = _unwrap_interrupt(interrupt_data)
+                        if hitl_request:
                             interrupt_occurred = True
 
-                    # Extract chunk_data from updates for todo checking
+                    # Extract chunk_data from updates for todo/proposal checking
+                    # Debug: Check all values in data dict for handoff state
                     chunk_data = next(iter(data.values())) if data else None
+                    
+                    # Also check if handoff state is directly in data (not nested)
+                    if not chunk_data and isinstance(data, dict):
+                        chunk_data = data
+                    
                     if chunk_data and isinstance(chunk_data, dict):
                         # Check for todo updates
                         if "todos" in chunk_data:
@@ -302,6 +369,9 @@ async def execute_task(
                                 console.print()
                                 render_todo_list(new_todos)
                                 console.print()
+
+                        # Handoff interrupts are now handled via HandoffApprovalMiddleware.interrupt()
+                        # Detection happens through __interrupt__ field (line 314), not state updates
 
                 # Handle MESSAGES stream - for content and tool calls
                 elif current_stream_mode == "messages":
@@ -498,47 +568,148 @@ async def execute_task(
 
             # Handle human-in-the-loop after stream completes
             if interrupt_occurred and hitl_request:
-                # Check if auto-approve is enabled
-                if session_state.auto_approve:
-                    # Auto-approve all commands without prompting
-                    decisions = []
-                    for action_request in hitl_request.get("action_requests", []):
-                        # Show what's being auto-approved (brief, dim message)
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
+                handoff_trace_metadata = None
+                # hitl_request is already unwrapped by _unwrap_interrupt()
+                # but double-check it's a valid dict
+                if not isinstance(hitl_request, dict):
+                    hitl_request = None
 
-                        description = action_request.get("description", "tool action")
-                        console.print()
-                        console.print(f"  [dim]⚡ {description}[/dim]")
+                decisions = []
+                # Check for handoff approval interrupt (from HandoffApprovalMiddleware)
+                if hitl_request and hitl_request.get("action") == "approve_handoff":
+                    # Import handoff UI
+                    from .handoff_ui import HandoffProposal, prompt_handoff_decision
 
-                        decisions.append({"type": "approve"})
+                    payload_metadata = hitl_request.get("metadata")
+                    if isinstance(payload_metadata, dict):
+                        handoff_trace_metadata = payload_metadata.copy()
 
-                    hitl_response = {"decisions": decisions}
-
-                    # Restart spinner for continuation
-                    if not spinner_active:
-                        status.start()
-                        spinner_active = True
-                else:
-                    # Normal HITL flow - stop spinner and prompt user
                     if spinner_active:
                         status.stop()
                         spinner_active = False
 
-                    # Handle human-in-the-loop approval
-                    decisions = []
-                    for action_request in hitl_request.get("action_requests", []):
-                        decision = await asyncio.to_thread(
-                            prompt_for_tool_approval,
-                            action_request,
-                            assistant_id,
-                        )
-                        decisions.append(decision)
-
-                    suppress_resumed_output = any(
-                        decision.get("type") == "reject" for decision in decisions
+                    # Build proposal from interrupt payload
+                    proposal = HandoffProposal(
+                        handoff_id=hitl_request.get("handoff_id", ""),
+                        summary_json=hitl_request.get("summary_json", {}),
+                        summary_md=hitl_request.get("summary", ""),  # "summary" key in interrupt payload
+                        parent_thread_id=hitl_request.get("parent_thread_id", ""),
+                        assistant_id=hitl_request.get("assistant_id", ""),
                     )
+
+                    # Get user decision (approve/refine/reject)
+                    decision_result = await asyncio.to_thread(
+                        prompt_handoff_decision,
+                        proposal,
+                        preview_only=False,
+                    )
+
+                    # Build resume data in format HandoffApprovalMiddleware expects
+                    if decision_result.type == "approve":
+                        # User approved - send approval to middleware
+                        decisions.append({
+                            "type": "approve",
+                        })
+
+                        # Prepare handoff but DON'T switch thread yet
+                        try:
+                            from deepagents_cli.handoff_persistence import apply_handoff_acceptance
+                            from deepagents.middleware.handoff_summarization import HandoffSummary
+
+                            parent_thread_id = hitl_request.get("parent_thread_id", "")
+                            hsum = HandoffSummary(
+                                handoff_id=hitl_request.get("handoff_id", ""),
+                                summary_json=decision_result.summary_json or hitl_request.get("summary_json", {}),
+                                summary_md=decision_result.summary_md or hitl_request.get("summary", ""),
+                            )
+
+                            child_id = apply_handoff_acceptance(
+                                session_state=session_state,
+                                summary=hsum,
+                                summary_md=hsum.summary_md,
+                                summary_json=hsum.summary_json,
+                                parent_thread_id=parent_thread_id,
+                            )
+
+                            # Store child_id for deferred switching (AFTER stream completes)
+                            session_state.pending_handoff_child_id = child_id
+                            console.print()
+                            console.print(f"[green]✓ Handoff approved. Processing...[/green]")
+                            console.print()
+
+                            # Don't return here - must continue to where Command(resume=...)
+                            # is sent to deliver the approval decision to the middleware.
+                            # Thread switching will happen in main.py after execute_task() completes.
+
+                        except Exception:  # pragma: no cover - defensive
+                            # Non-fatal persistence errors shouldn't crash the run
+                            pass
+
+                    elif decision_result.type == "refine":
+                        # User wants refinement - send feedback to middleware
+                        # Middleware will regenerate and interrupt again with new summary
+                        decisions.append({
+                            "type": "refine",
+                            "feedback": decision_result.feedback or "",
+                        })
+                        console.print()
+                        console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
+                        console.print()
+
+                    else:  # reject
+                        # User rejected - send rejection to middleware
+                        decisions.append({
+                            "type": "reject",
+                            "message": "User declined handoff",
+                        })
+
+                # Handle other HITL actions (tool approvals) with legacy schema
+                else:
+                    action_requests = (
+                        hitl_request.get("action_requests", []) if hitl_request else []
+                    )
+
+                    for action_request in action_requests:
+                        action_name = action_request.get("name")
+
+                        if session_state.auto_approve:
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
+
+                            description = action_request.get("description", "tool action")
+                            console.print()
+                            console.print(f"  [dim]⚡ {description}[/dim]")
+
+                            decisions.append({"type": "approve"})
+
+                            if not spinner_active:
+                                status.start()
+                                spinner_active = True
+                        else:
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
+
+                            decision = await asyncio.to_thread(
+                                prompt_for_tool_approval,
+                                action_request,
+                                assistant_id,
+                            )
+                            decisions.append(decision)
+
+                # Suppress output if any action was rejected (but NOT for refine - that continues the loop)
+                # For handoff decisions, check "type"; for tool approvals, check "type"
+                suppress_resumed_output = any(
+                    d.get("type") == "reject" for d in decisions
+                )
+
+                # Format resume data based on what type of interrupt occurred
+                if hitl_request and hitl_request.get("action") == "approve_handoff":
+                    # HandoffApprovalMiddleware expects: {"type": "approve|refine|reject", "feedback": "..."}
+                    hitl_response = decisions[0] if decisions else {"type": "reject"}
+                else:
+                    # Other HITL actions (tool approvals) expect {"decisions": [...]} format
                     hitl_response = {"decisions": decisions}
 
             if interrupt_occurred and hitl_response:
@@ -556,7 +727,7 @@ async def execute_task(
                 stream_input = Command(resume=hitl_response)
                 # Continue the while loop to restream
             else:
-                # No interrupt, break out of while loop
+                handoff_trace_metadata = None
                 break
 
     except asyncio.CancelledError:
@@ -568,7 +739,7 @@ async def execute_task(
 
         try:
             await agent.aupdate_state(
-                config=config,
+                config=build_run_config(with_trace_metadata=False),
                 values={
                     "messages": [
                         HumanMessage(content="[The previous request was cancelled by the system]")
@@ -591,7 +762,7 @@ async def execute_task(
         # Inform the agent synchronously (in async context)
         try:
             await agent.aupdate_state(
-                config=config,
+                config=build_run_config(with_trace_metadata=False),
                 values={
                     "messages": [
                         HumanMessage(content="[User interrupted the previous request with Ctrl+C]")
@@ -621,6 +792,36 @@ async def execute_task(
                     )
                 except Exception:  # pragma: no cover - defensive
                     pass
+
+    # Check for handoff cleanup flag and clear summary block if needed
+    if session_state and session_state.thread_manager and thread_id:
+        try:
+            # Get final state to check for cleanup flag
+            final_state = await agent.aget_state(build_run_config(with_trace_metadata=False))
+            if final_state and final_state.values.get("_handoff_cleanup_pending"):
+                # Clear the summary block from agent.md
+                from deepagents_cli.handoff_persistence import clear_summary_block_file
+                from datetime import datetime, timezone
+
+                agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
+                clear_summary_block_file(agent_md_path)
+
+                # Update thread metadata to mark cleanup as complete
+                # Get existing handoff metadata and update only cleanup fields
+                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
+                if thread_meta and "handoff" in thread_meta.get("metadata", {}):
+                    existing_handoff = thread_meta["metadata"]["handoff"]
+                    updated_handoff = existing_handoff | {
+                        "pending": False,
+                        "cleanup_required": False,
+                        "last_cleanup_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    session_state.thread_manager.update_thread_metadata(
+                        thread_id,
+                        {"handoff": updated_handoff},
+                    )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     # Touch the thread so cleanup/TTL logic sees recent activity
     if session_state and session_state.thread_manager and thread_id:

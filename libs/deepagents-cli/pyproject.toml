@@ -10,7 +10,8 @@ dependencies = [
   "requests",
   "rich>=13.0.0",
   "prompt-toolkit>=3.0.52",
-  "questionary>=2.0.0",
+  "questionary>=2.0.0",  # Keep for legacy compatibility
+  "cement>=3.0.0",  # New: Cement framework for CLI structure
   "langchain-anthropic>=0.1.0",
   "langchain-community>=0.1.0",
   "langchain-openai>=0.1.0",

@@ -55,8 +55,25 @@ def check_cli_dependencies() -> None:
         sys.exit(1)
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     """Parse command line arguments."""
+    commands = {"list", "help", "reset"}
+
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    # Support legacy positional agent selection by rewriting the first argument
+    # into --agent <value> when it is not a known subcommand or flag.
+    if argv:
+        first = argv[0]
+        if not first.startswith("-") and first not in commands:
+            console.print(
+                f"[dim]Interpreting '{first}' as --agent {first} (legacy positional syntax)[/dim]"
+            )
+            argv = ["--agent", first, *argv[1:]]
+
     parser = argparse.ArgumentParser(
         description="DeepAgents - AI Coding Assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -89,8 +106,14 @@ def parse_args():
         action="store_true",
         help="Auto-approve tool usage without prompting (disables human-in-the-loop)",
     )
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help="Show this help message and exit (same as 'deepagents help').",
+    )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 async def simple_cli(

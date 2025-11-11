@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 from typing import NotRequired
 
 from deepagents.backends.protocol import BackendProtocol
+from langsmith import traceable
+from langchain_core.callbacks.manager import get_callback_manager_for_config
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -128,6 +130,7 @@ class AgentMemoryMiddleware(AgentMiddleware):
         self.memory_path = memory_path
         self.system_prompt_template = system_prompt_template or DEFAULT_MEMORY_SNIPPET
 
+    @traceable(name="memory.load", tags=["middleware", "memory"])
     def before_agent(
         self,
         state: AgentMemoryState,
@@ -145,9 +148,26 @@ class AgentMemoryMiddleware(AgentMiddleware):
         # Only load memory if it hasn't been loaded yet
         if "agent_memory" not in state or state.get("agent_memory") is None:
             file_data = self.backend.read(AGENT_MEMORY_FILE_PATH)
+            # Emit scoped metadata to current run if available
+            try:
+                config = getattr(runtime, "config", None)
+                if config:
+                    cb = get_callback_manager_for_config(config)
+                    if cb:
+                        cb.add_metadata(
+                            {
+                                "memory.path": AGENT_MEMORY_FILE_PATH,
+                                "memory.loaded": True,
+                                "memory.size_chars": len(file_data or ""),
+                            },
+                            inherit=False,
+                        )
+            except Exception:
+                pass
             return {"agent_memory": file_data}
         return None
 
+    @traceable(name="memory.load", tags=["middleware", "memory"])  # async variant
     async def abefore_agent(
         self,
         state: AgentMemoryState,
@@ -171,9 +191,25 @@ class AgentMemoryMiddleware(AgentMiddleware):
                 )
             else:
                 file_data = await asyncio.to_thread(self.backend.read, AGENT_MEMORY_FILE_PATH)
+            try:
+                config = getattr(runtime, "config", None)
+                if config:
+                    cb = get_callback_manager_for_config(config)
+                    if cb:
+                        cb.add_metadata(
+                            {
+                                "memory.path": AGENT_MEMORY_FILE_PATH,
+                                "memory.loaded": True,
+                                "memory.size_chars": len(file_data or ""),
+                            },
+                            inherit=False,
+                        )
+            except Exception:
+                pass
             return {"agent_memory": file_data}
         return None
 
+    @traceable(name="memory.inject", tags=["middleware", "memory"])
     def wrap_model_call(
         self,
         request: ModelRequest,
@@ -202,8 +238,21 @@ class AgentMemoryMiddleware(AgentMiddleware):
             + LONGTERM_MEMORY_SYSTEM_PROMPT.format(memory_path=self.memory_path)
         )
 
+        try:
+            cb = get_callback_manager_for_config(getattr(request, "runtime", {}).get("config", {}))
+            if cb:
+                cb.add_metadata(
+                    {
+                        "memory.injected": True,
+                        "system_prompt_len": len(request.system_prompt or ""),
+                    },
+                    inherit=False,
+                )
+        except Exception:
+            pass
         return handler(request)
 
+    @traceable(name="memory.inject", tags=["middleware", "memory"])  # async variant
     async def awrap_model_call(
         self,
         request: ModelRequest,
@@ -232,4 +281,16 @@ class AgentMemoryMiddleware(AgentMiddleware):
             + LONGTERM_MEMORY_SYSTEM_PROMPT.format(memory_path=self.memory_path)
         )
 
+        try:
+            cb = get_callback_manager_for_config(getattr(request, "runtime", {}).get("config", {}))
+            if cb:
+                cb.add_metadata(
+                    {
+                        "memory.injected": True,
+                        "system_prompt_len": len(request.system_prompt or ""),
+                    },
+                    inherit=False,
+                )
+        except Exception:
+            pass
         return await handler(request)

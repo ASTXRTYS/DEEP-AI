@@ -232,6 +232,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cement"
+version = "3.0.14"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/9a/9f444fcb8d372e5fd0791029fdc44162c95c4944b56114e27e366874a984/cement-3.0.14.tar.gz", hash = "sha256:0a8efc10646bd9a68d5cc5d2b69cfa0d9b3c186ce5d268497e3bbfc823dcb525", size = 98676, upload-time = "2025-05-05T16:54:20.704Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/34/019ede76aeed47e6056700d9538ad28087a0f1aaec5ee483cf22ece716c4/cement-3.0.14-py3-none-any.whl", hash = "sha256:d20376f8447717998aa7b0bc0384fcad730be580a13df336b326c575e340c43e", size = 138386, upload-time = "2025-05-05T16:54:19.448Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.10.5"
 source = { registry = "https://pypi.org/simple" }
@@ -573,6 +582,7 @@ version = "0.0.7"
 source = { editable = "libs/deepagents-cli" }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "cement" },
     { name = "deepagents" },
     { name = "filelock" },
     { name = "langchain-anthropic" },
@@ -619,6 +629,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.17.0" },
+    { name = "cement", specifier = ">=3.0.0" },
     { name = "deepagents", editable = "." },
     { name = "filelock", specifier = ">=3.15.0" },
     { name = "langchain-anthropic", specifier = ">=0.1.0" },

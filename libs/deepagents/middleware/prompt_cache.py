@@ -6,6 +6,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.messages import BaseMessage
+from langchain_core.callbacks.manager import get_callback_manager_for_config
 
 
 def _message_has_content(message: BaseMessage) -> bool:
@@ -36,13 +37,31 @@ class SafeAnthropicPromptCachingMiddleware(AnthropicPromptCachingMiddleware):
 
     def _should_apply_caching(self, request: ModelRequest) -> bool:  # type: ignore[override]
         if not super()._should_apply_caching(request):
+            try:
+                cb = get_callback_manager_for_config(getattr(request.runtime, "config", {}))
+                if cb:
+                    cb.add_metadata({"prompt_cache.applied": False, "prompt_cache.reason": "super_disallowed"}, inherit=False)
+            except Exception:
+                pass
             return False
 
         # Only applies to Anthropic chat models; defensive double-check.
         if not isinstance(request.model, ChatAnthropic):
+            try:
+                cb = get_callback_manager_for_config(getattr(request.runtime, "config", {}))
+                if cb:
+                    cb.add_metadata({"prompt_cache.applied": False, "prompt_cache.reason": "not_anthropic"}, inherit=False)
+            except Exception:
+                pass
             return False
 
         if not self._last_message_has_content(request):
+            try:
+                cb = get_callback_manager_for_config(getattr(request.runtime, "config", {}))
+                if cb:
+                    cb.add_metadata({"prompt_cache.applied": False, "prompt_cache.reason": "empty_tail"}, inherit=False)
+            except Exception:
+                pass
             return False
 
         # Skip caching entirely for handoff-triggered runs to avoid Anthropic crashes.
@@ -50,8 +69,20 @@ class SafeAnthropicPromptCachingMiddleware(AnthropicPromptCachingMiddleware):
         configurable = dict(config.get("configurable") or {})
         metadata = dict(config.get("metadata") or {})
         if configurable.get("handoff_requested") or metadata.get("handoff_requested"):
+            try:
+                cb = get_callback_manager_for_config(getattr(request.runtime, "config", {}))
+                if cb:
+                    cb.add_metadata({"prompt_cache.applied": False, "prompt_cache.reason": "handoff"}, inherit=False)
+            except Exception:
+                pass
             return False
 
+        try:
+            cb = get_callback_manager_for_config(getattr(request.runtime, "config", {}))
+            if cb:
+                cb.add_metadata({"prompt_cache.applied": True}, inherit=False)
+        except Exception:
+            pass
         return True
 
     def _apply_cache_control(self, request: ModelRequest) -> None:  # type: ignore[override]

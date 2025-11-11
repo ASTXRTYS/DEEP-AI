@@ -21,6 +21,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
+from langsmith import traceable, Client
 
 
 class HandoffState(AgentState):
@@ -66,6 +67,7 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         super().__init__()
         self.model = model
 
+    @traceable(name="handoff.approval.loop", tags=["middleware", "handoff"]) 
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Emit interrupt for handoff approval with iterative refinement loop.
 
@@ -157,6 +159,12 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         else:
             current_summary = proposal.get("summary_md", "")
 
+        client = None
+        try:
+            client = Client()
+        except Exception:
+            client = None
+
         while True:
             # Refresh iteration to ensure metadata matches current state
             iteration = proposal["_refinement_iteration"]
@@ -201,8 +209,29 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
             # Mark that we're awaiting resume so replays can be detected
             proposal["_refinement_waiting_for_resume"] = True
 
-            # Wait for user decision - interrupt() returns resume data
-            resume_data = interrupt(interrupt_payload)
+            # Create a child span for this approval iteration if client available
+            if client is not None:
+                iter_trace_ctx = client.trace(
+                    name="handoff.approval.iteration",
+                    tags=["middleware", "handoff"],
+                    metadata={
+                        "handoff.iteration": iteration,
+                        "handoff.is_replay": is_replay,
+                        "handoff.cache_hit": cache_hit,
+                        "handoff.refinement_count": len(refinement_cache),
+                    },
+                )
+            else:
+                iter_trace_ctx = None
+
+            if iter_trace_ctx is not None:
+                with iter_trace_ctx as run:
+                    # Wait for user decision - interrupt() returns resume data
+                    resume_data = interrupt(interrupt_payload)
+                    pass
+            else:
+                # Fallback: no explicit child span
+                resume_data = interrupt(interrupt_payload)
 
             # Reset replay flag once resume data has been received
             proposal["_refinement_waiting_for_resume"] = False

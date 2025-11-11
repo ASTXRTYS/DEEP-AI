@@ -6,6 +6,7 @@ from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
+from langsmith import traceable
 
 # Summary block markers (must match CLI persistence layer)
 SUMMARY_START_TAG = "<current_thread_summary>"
@@ -29,6 +30,7 @@ class HandoffCleanupMiddleware(AgentMiddleware):
         """Initialize cleanup middleware."""
         super().__init__()
 
+    @traceable(name="handoff.cleanup", tags=["middleware", "handoff"]) 
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Clean up summary block if this is a handoff child's first turn.
 

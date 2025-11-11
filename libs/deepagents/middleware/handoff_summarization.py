@@ -18,6 +18,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.runtime import Runtime
+from langsmith import traceable
 
 # Summarization configuration constants
 # Based on Claude Sonnet 4 context window and typical conversation patterns
@@ -275,6 +276,7 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
         super().__init__()
         self.model = _ensure_model(model)
 
+    @traceable(name="handoff.summary.generate", tags=["middleware", "handoff"]) 
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Generate summary after model proposes handoff tool call.
 

@@ -15,6 +15,8 @@ from langchain.agents.middleware.types import AgentState
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+from langsmith import traceable
+import re
 
 
 class ResumableShellToolMiddleware(ShellToolMiddleware):
@@ -32,6 +34,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
     allowing HITL pauses to succeed.
     """
 
+    @traceable(name="shell.command.execute", tags=["middleware", "shell"]) 
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -46,6 +49,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
             )
         return super().wrap_tool_call(request, handler)
 
+    @traceable(name="shell.command.execute", tags=["middleware", "shell"]) 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -73,6 +77,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
         resources = state.get("shell_session_resources")
         return isinstance(resources, _SessionResources)
 
+    @traceable(name="shell.session.restore", tags=["middleware", "shell"]) 
     def _get_or_create_resources(self, state: AgentState) -> _SessionResources:
         resources = state.get("shell_session_resources")
         if isinstance(resources, _SessionResources):
@@ -81,6 +86,19 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
         new_resources = self._create_resources()
         cast("dict[str, Any]", state)["shell_session_resources"] = new_resources
         return new_resources
+
+    @staticmethod
+    def _sanitize_command_preview(args: dict[str, Any]) -> str:
+        try:
+            cmd = args.get("command")
+            if isinstance(cmd, list):
+                preview = " ".join(str(c) for c in cmd)
+            else:
+                preview = str(cmd)
+            preview = re.sub(r"(api|token|key|secret)=\S+", r"\1=***", preview, flags=re.I)
+            return (preview or "").strip()[:200]
+        except Exception:
+            return ""
 
 
 __all__ = ["ResumableShellToolMiddleware"]

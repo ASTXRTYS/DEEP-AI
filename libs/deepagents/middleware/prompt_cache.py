@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
 from langchain.agents.middleware.types import ModelRequest
-from langchain_core.messages import BaseMessage
-
+from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+from langchain_core.messages import BaseMessage
 
 
 def _message_has_content(message: BaseMessage) -> bool:

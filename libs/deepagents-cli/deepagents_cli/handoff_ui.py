@@ -50,7 +50,6 @@ async def prompt_handoff_decision(
     Returns:
         HandoffDecision with type="approve", "refine", or "reject"
     """
-
     console.print()
     console.print(
         Panel(
@@ -75,19 +74,21 @@ async def prompt_handoff_decision(
     from questionary import Choice, Style
 
     # Handoff approval style
-    handoff_style = Style([
-        ('qmark', f'fg:{COLORS["primary"]} bold'),
-        ('question', 'bold'),
-        ('answer', f'fg:{COLORS["primary"]} bold'),
-        ('pointer', f'fg:{COLORS["primary"]} bold'),
-        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),
-        ('selected', f'fg:{COLORS["primary"]}'),
-        ('instruction', 'fg:#888888 italic'),
-        ('text', ''),
-        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
-        ('search_none', 'fg:#888888'),  # No search results message
-        ('separator', 'fg:#888888'),  # Separators in lists
-    ])
+    handoff_style = Style(
+        [
+            ("qmark", f"{COLORS['primary']} bold"),
+            ("question", "bold"),
+            ("answer", f"{COLORS['primary']} bold"),
+            ("pointer", f"{COLORS['primary']} bold"),
+            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),
+            ("selected", f"{COLORS['primary']}"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", f"{COLORS['primary']}"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
 
     console.print()
     try:
@@ -124,7 +125,7 @@ async def prompt_handoff_decision(
             summary_json=proposal.summary_json,
         )
 
-    elif decision == "refine":
+    if decision == "refine":
         console.print()
         console.print("[yellow]Provide feedback to improve the summary:[/yellow]")
         console.print()
@@ -140,7 +141,8 @@ async def prompt_handoff_decision(
                 style=handoff_style,
                 qmark="✎",
                 instruction="(Type feedback, press Alt+Enter or Esc then Enter to finish)",
-                validate=lambda text: len(text.strip()) > 0 or "Feedback cannot be empty for refinement",
+                validate=lambda text: len(text.strip()) > 0
+                or "Feedback cannot be empty for refinement",
             ).ask_async()
         except (KeyboardInterrupt, EOFError):
             console.print()
@@ -160,14 +162,14 @@ async def prompt_handoff_decision(
             summary_json=proposal.summary_json,
         )
 
-    else:  # decline
-        console.print("[yellow]✕ Handoff declined by user.[/yellow]")
-        console.print()
-        return HandoffDecision(
-            type="reject",
-            summary_md=proposal.summary_md,
-            summary_json=proposal.summary_json,
-        )
+    # decline
+    console.print("[yellow]✕ Handoff declined by user.[/yellow]")
+    console.print()
+    return HandoffDecision(
+        type="reject",
+        summary_md=proposal.summary_md,
+        summary_json=proposal.summary_json,
+    )
 
 
-__all__ = ["HandoffProposal", "HandoffDecision", "prompt_handoff_decision"]
+__all__ = ["HandoffDecision", "HandoffProposal", "prompt_handoff_decision"]

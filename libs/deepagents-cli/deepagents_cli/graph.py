@@ -14,7 +14,6 @@ from pathlib import Path
 
 def _ensure_workspace_on_path() -> None:
     """Ensure monorepo root + libs are available for server imports."""
-
     current = Path(__file__).resolve()
     workspace_root = None
 
@@ -37,6 +36,12 @@ _ensure_workspace_on_path()
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware import (
+    HandoffCleanupMiddleware,
+    HandoffToolMiddleware,
+)
+from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
+from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from langchain.agents.middleware import HostExecutionPolicy
 from langchain_anthropic import ChatAnthropic
 
@@ -101,6 +106,18 @@ backend = CompositeBackend(default=FilesystemBackend(), routes={"/memories/": lo
 agent_middleware = [
     AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
     shell_middleware,
+    # Handoff middleware stack (order matters for after_model execution!)
+    # CRITICAL: after_model() hooks execute in REVERSE order (last-to-first)
+    # Reference: https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L1395-1410
+    HandoffToolMiddleware(),  # Provides request_handoff tool (no after_model hook)
+    # Listed in REVERSE of execution order for after_model():
+    HandoffApprovalMiddleware(
+        model=model
+    ),  # after_model() executes SECOND (reads proposal, interrupts, refines)
+    HandoffSummarizationMiddleware(
+        model=model
+    ),  # after_model() executes FIRST (generates proposal)
+    HandoffCleanupMiddleware(),  # after_agent() hook for cleanup
 ]
 
 # Create agent WITHOUT checkpointer/store (server provides these)

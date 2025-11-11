@@ -5,10 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.runtime import Runtime
-from langgraph.types import interrupt
 
 
 @tool
@@ -49,10 +47,10 @@ class HandoffToolMiddleware(AgentMiddleware):
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """No pre-processing needed - tool registration is automatic."""
         return None
-    
+
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """No state updates needed - tool registration is sufficient.
-        
+
         Detection of request_handoff calls happens independently in
         HandoffSummarizationMiddleware by inspecting messages.
         """

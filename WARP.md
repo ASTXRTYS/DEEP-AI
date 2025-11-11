@@ -2,6 +2,8 @@
 
 This file provides guidance to WARP (warp.dev) when working with code in this repository.
 
+> **Mandatory Protocol:** Warp agents must read and comply with [`AGENT.md`](AGENT.md) before running commands or editing files. Treat that document as the non-negotiable operating agreement for this repo.
+
 ---
 
 ## Repository Structure

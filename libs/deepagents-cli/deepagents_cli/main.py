@@ -132,7 +132,7 @@ async def simple_cli(
         console.print()
 
     console.print(
-        "  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
+        "  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+M for menu, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
         style=f"dim {COLORS['dim']}",
     )
     console.print()
@@ -152,6 +152,18 @@ async def simple_cli(
             # Ctrl+C at prompt - exit the program
             console.print("\nGoodbye!", style=COLORS["primary"])
             break
+
+        # Check if menu was requested via Ctrl+M
+        if session_state.menu_requested:
+            session_state.menu_requested = False  # Reset flag
+            from .menu_system import MenuSystem
+
+            menu_system = MenuSystem(session_state, agent, token_tracker)
+            result = await menu_system.show_main_menu()
+            if result == "exit":
+                console.print("\nGoodbye!", style=COLORS["primary"])
+                break
+            continue  # Return to prompt after menu
 
         if not user_input:
             continue
@@ -242,7 +254,9 @@ async def main(assistant_id: str, session_state) -> None:
 
     if not USE_ASYNC_CHECKPOINTER:
         console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
-        console.print("[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]")
+        console.print(
+            "[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]"
+        )
         console.print()
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver

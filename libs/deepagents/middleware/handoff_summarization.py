@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import re
-from typing import Annotated, Any, Iterable, Sequence
-from typing_extensions import NotRequired
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr
 from langchain.chat_models import init_chat_model
@@ -14,7 +14,6 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
-    HumanMessage,
     ToolMessage,
 )
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
@@ -33,6 +32,7 @@ class HandoffState(AgentState):
 
     Includes internal coordination fields for handoff proposal and approval flow.
     """
+
     _handoff_proposal: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
     handoff_decision: NotRequired[dict[str, Any] | None]
     handoff_approved: NotRequired[bool]
@@ -88,14 +88,13 @@ def _ai_has_tool_call(ai_message: AIMessage, tool_call_id: str | None) -> bool:
     for call in tool_calls:
         if isinstance(call, dict) and call.get("id") == tool_call_id:
             return True
-        if hasattr(call, "id") and getattr(call, "id") == tool_call_id:
+        if hasattr(call, "id") and call.id == tool_call_id:
             return True
     return False
 
 
 def select_messages_for_summary(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Select a high-signal window of messages for summarization."""
-
     if not messages:
         return []
 
@@ -109,10 +108,7 @@ def select_messages_for_summary(messages: Sequence[BaseMessage]) -> list[BaseMes
         tool_call_id = getattr(msg, "tool_call_id", None)
         if tool_call_id is None:
             continue
-        has_pair = any(
-            isinstance(candidate, AIMessage) and _ai_has_tool_call(candidate, tool_call_id)
-            for candidate in window[:idx]
-        )
+        has_pair = any(isinstance(candidate, AIMessage) and _ai_has_tool_call(candidate, tool_call_id) for candidate in window[:idx])
         if has_pair:
             continue
         search_upper = max(0, start_index - MAX_TOOL_PAIR_LOOKBACK)
@@ -155,14 +151,7 @@ def render_summary_markdown(title: str, tldr: str, body: Iterable[str]) -> str:
     bullet_lines = [f"- {line.strip()}" for line in body if line.strip()]
     if not bullet_lines:
         bullet_lines = ["- Additional details pending."]
-    return (
-        "### Recent Thread Snapshot\n"
-        f"**Title:** {title.strip()}\n"
-        f"**TL;DR:** {tldr.strip()}\n\n"
-        "#### Key Points\n"
-        + "\n".join(bullet_lines)
-        + "\n"
-    )
+    return f"### Recent Thread Snapshot\n**Title:** {title.strip()}\n**TL;DR:** {tldr.strip()}\n\n#### Key Points\n" + "\n".join(bullet_lines) + "\n"
 
 
 def generate_handoff_summary(
@@ -189,9 +178,8 @@ def generate_handoff_summary(
     Raises:
         ValueError: If LLM invocation fails after retries
     """
-
-    from uuid import uuid4
     import logging
+    from uuid import uuid4
 
     logger = logging.getLogger(__name__)
     llm = _ensure_model(model)
@@ -215,14 +203,10 @@ def generate_handoff_summary(
             break  # Success, exit retry loop
         except Exception as e:
             last_error = e
-            logger.warning(
-                f"LLM invocation failed (attempt {attempt + 1}/{max_retries + 1}): {e}"
-            )
+            logger.warning(f"LLM invocation failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
             if attempt == max_retries:
                 # Final attempt failed, raise with context
-                raise ValueError(
-                    f"Failed to generate handoff summary after {max_retries + 1} attempts"
-                ) from e
+                raise ValueError(f"Failed to generate handoff summary after {max_retries + 1} attempts") from e
 
     raw_content = getattr(response, "content", "")
     if isinstance(raw_content, list):
@@ -298,6 +282,11 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
         handles HITL approval using interrupt() per LangChain v1 pattern.
         https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/add-human-in-the-loop/
 
+        Metadata Emission:
+        Emits observability metadata to LangSmith traces:
+        - handoff.summary_generation: Always true when this middleware generates a summary
+        - handoff.summary_error: Error message if summary generation fails
+
         Args:
             state: Current agent state
             runtime: Runtime context
@@ -306,6 +295,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
             State update with _handoff_proposal, or None if no handoff requested
         """
         import logging
+
+        from langchain_core.callbacks.manager import get_callback_manager_for_config
 
         logger = logging.getLogger(__name__)
 
@@ -328,6 +319,20 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
 
         # Generate summary using helper function with error handling
         messages = state.get("messages") or []
+
+        # Emit metadata for summary generation
+        config = getattr(runtime, "config", None)
+        if config and (callbacks := config.get("callbacks")):
+            try:
+                callback_manager = get_callback_manager_for_config(config)
+                if callback_manager:
+                    callback_manager.add_metadata(
+                        {"handoff.summary_generation": True},
+                        inherit=False,
+                    )
+            except Exception as e:
+                logger.debug(f"Failed to emit summary generation metadata: {e}")
+
         try:
             summary = generate_handoff_summary(
                 model=self.model,
@@ -337,6 +342,19 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState]):
             )
         except Exception as e:
             logger.error(f"Failed to generate handoff summary: {e}")
+
+            # Emit error metadata
+            if config and (callbacks := config.get("callbacks")):
+                try:
+                    callback_manager = get_callback_manager_for_config(config)
+                    if callback_manager:
+                        callback_manager.add_metadata(
+                            {"handoff.summary_error": str(e)[:200]},
+                            inherit=False,
+                        )
+                except Exception as meta_err:
+                    logger.debug(f"Failed to emit error metadata: {meta_err}")
+
             # Return error state instead of crashing
             return {
                 "_handoff_proposal": None,

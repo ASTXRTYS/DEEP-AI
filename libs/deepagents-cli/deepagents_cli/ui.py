@@ -9,10 +9,13 @@ from typing import Any
 from rich import box
 from rich.markup import escape
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from .config import COLORS, COMMANDS, DEEP_AGENTS_ASCII, MAX_ARG_LENGTH, console
 from .file_ops import FileOperationRecord
+from .ui_components import create_header_panel
+from .ui_constants import Colors, Icons
 
 
 def truncate_value(value: str, max_length: int = MAX_ARG_LENGTH) -> str:
@@ -199,31 +202,49 @@ class TokenTracker:
             console.print(f"  Current context: {self.current_context:,} tokens", style="dim")
 
     def display_session(self) -> None:
-        """Display current context size."""
-        console.print("\n[bold]Token Usage:[/bold]", style=COLORS["primary"])
+        """Display current context size with enhanced formatting."""
+        # Create header
+        header = create_header_panel(f"{Icons.TOKENS} Token Usage", "Current session statistics")
+        console.print(header)
+        console.print()
 
-        # Check if we've had any actual API calls yet (current > baseline means we have conversation)
+        # Check if we've had any actual API calls yet
         has_conversation = self.current_context > self.baseline_context
 
+        # Create table for token breakdown
+        table = Table(
+            show_header=True,
+            header_style=f"bold {Colors.PRIMARY}",
+            border_style=Colors.BORDER_DIM,
+            padding=(0, 2),
+            expand=False,
+        )
+
+        table.add_column("Component", style="bold")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Description", style="dim")
+
+        # Add baseline row
         if self.baseline_context > 0:
-            console.print(
-                f"  Baseline: {self.baseline_context:,} tokens [dim](system + agent.md)[/dim]",
-                style=COLORS["dim"],
-            )
+            table.add_row("Baseline", f"{self.baseline_context:,}", "System prompt + agent.md")
 
-            if not has_conversation:
-                # Before first message - warn that tools aren't counted yet
-                console.print(
-                    "  [dim]Note: Tool definitions (~5k tokens) included after first message[/dim]"
-                )
-
+        # Add conversation row if applicable
         if has_conversation:
             tools_and_conversation = self.current_context - self.baseline_context
-            console.print(
-                f"  Tools + conversation: {tools_and_conversation:,} tokens", style=COLORS["dim"]
+            table.add_row("Conversation", f"{tools_and_conversation:,}", "Tools + messages")
+        elif self.baseline_context > 0:
+            # Before first message
+            table.add_row("Note", "—", "Tool definitions (~5k) added after first message")
+
+        # Add total row with visual separator
+        if self.current_context > 0:
+            table.add_row(
+                "[bold]Total[/bold]",
+                f"[bold cyan]{self.current_context:,}[/bold cyan]",
+                "Current context size",
             )
 
-        console.print(f"  Total: {self.current_context:,} tokens", style="bold " + COLORS["dim"])
+        console.print(table)
         console.print()
 
 
@@ -480,52 +501,56 @@ def render_diff_block(diff: str, title: str) -> None:
 
 
 def show_interactive_help() -> None:
-    """Show available commands during interactive session."""
+    """Show available commands during interactive session with enhanced formatting."""
     console.print()
-    console.print("[bold]Interactive Commands:[/bold]", style=COLORS["primary"])
+    header = create_header_panel(
+        f"{Icons.HELP} Interactive Help", "Quick reference for commands and shortcuts"
+    )
+    console.print(header)
     console.print()
 
-    for cmd, desc in COMMANDS.items():
-        console.print(f"  /{cmd:<12} {desc}", style=COLORS["dim"])
+    # Commands section
+    commands_panel = Panel(
+        "\n".join([f"[cyan]/{cmd:<12}[/cyan] {desc}" for cmd, desc in COMMANDS.items()]),
+        title="[bold]Commands[/bold]",
+        border_style=Colors.PRIMARY,
+        padding=(1, 2),
+    )
+    console.print(commands_panel)
+    console.print()
 
+    # Keyboard shortcuts section
+    shortcuts_content = (
+        "[cyan]Enter[/cyan]           Submit your message\n"
+        "[cyan]Alt+Enter[/cyan]       Insert newline (Option+Enter or ESC then Enter)\n"
+        "[cyan]Ctrl+E[/cyan]          Open in external editor\n"
+        "[cyan]Ctrl+T[/cyan]          Toggle auto-approve mode\n"
+        "[cyan]Ctrl+M[/cyan]          Open menu\n"
+        "[cyan]Arrow keys[/cyan]      Navigate input\n"
+        "[cyan]Ctrl+C[/cyan]          Cancel input or interrupt agent"
+    )
+    shortcuts_panel = Panel(
+        shortcuts_content,
+        title="[bold]Keyboard Shortcuts[/bold]",
+        border_style=Colors.PRIMARY,
+        padding=(1, 2),
+    )
+    console.print(shortcuts_panel)
     console.print()
-    console.print("[bold]Editing Features:[/bold]", style=COLORS["primary"])
-    console.print("  Enter           Submit your message", style=COLORS["dim"])
-    console.print(
-        "  Alt+Enter       Insert newline (Option+Enter on Mac, or ESC then Enter)",
-        style=COLORS["dim"],
+
+    # Special features section
+    features_content = (
+        "[cyan]@filename[/cyan]       Type @ to auto-complete and inject file content\n"
+        "[cyan]/command[/cyan]        Type / for command completion\n"
+        "[cyan]!command[/cyan]        Type ! to run bash commands (e.g., !ls, !git status)"
     )
-    console.print(
-        "  Ctrl+E          Open in external editor (nano by default)", style=COLORS["dim"]
+    features_panel = Panel(
+        features_content,
+        title="[bold]Special Features[/bold]",
+        border_style=Colors.PRIMARY,
+        padding=(1, 2),
     )
-    console.print("  Ctrl+T          Toggle auto-approve mode", style=COLORS["dim"])
-    console.print("  Arrow keys      Navigate input", style=COLORS["dim"])
-    console.print("  Ctrl+C          Cancel input or interrupt agent mid-work", style=COLORS["dim"])
-    console.print()
-    console.print("[bold]Special Features:[/bold]", style=COLORS["primary"])
-    console.print(
-        "  @filename       Type @ to auto-complete files and inject content", style=COLORS["dim"]
-    )
-    console.print(
-        "  /command        Type /help to see commands (or press Tab after /)", style=COLORS["dim"]
-    )
-    console.print(
-        "  !command        Type ! to run bash commands (e.g., !ls, !git status)",
-        style=COLORS["dim"],
-    )
-    console.print(
-        "                  Completions appear automatically as you type", style=COLORS["dim"]
-    )
-    console.print()
-    console.print("[bold]Auto-Approve Mode:[/bold]", style=COLORS["primary"])
-    console.print("  Ctrl+T          Toggle auto-approve mode", style=COLORS["dim"])
-    console.print(
-        "  --auto-approve  Start CLI with auto-approve enabled (via command line)",
-        style=COLORS["dim"],
-    )
-    console.print(
-        "  When enabled, tool actions execute without confirmation prompts", style=COLORS["dim"]
-    )
+    console.print(features_panel)
     console.print()
 
 

@@ -17,19 +17,15 @@ SUMMARY_PLACEHOLDER = "None recorded yet."
 
 def ensure_summary_section(text: str) -> str:
     """Ensure the agent.md content contains a summary section block."""
-
     if SUMMARY_START_TAG in text and SUMMARY_END_TAG in text:
         return text
 
-    block = (
-        f"\n\n{SUMMARY_START_TAG}\n{SUMMARY_PLACEHOLDER}\n{SUMMARY_END_TAG}\n"
-    )
+    block = f"\n\n{SUMMARY_START_TAG}\n{SUMMARY_PLACEHOLDER}\n{SUMMARY_END_TAG}\n"
     return text.rstrip() + block + "\n"
 
 
 def replace_summary_block(text: str, summary_md: str) -> str:
     """Replace the current summary block contents with the provided Markdown."""
-
     prepared = ensure_summary_section(text)
     start_index = prepared.index(SUMMARY_START_TAG) + len(SUMMARY_START_TAG)
     end_index = prepared.index(SUMMARY_END_TAG)
@@ -42,7 +38,6 @@ def replace_summary_block(text: str, summary_md: str) -> str:
 
 def clear_summary_block(text: str) -> str:
     """Reset the summary block to its placeholder content."""
-
     prepared = ensure_summary_section(text)
     start_index = prepared.index(SUMMARY_START_TAG) + len(SUMMARY_START_TAG)
     end_index = prepared.index(SUMMARY_END_TAG)
@@ -61,7 +56,6 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def write_summary_block(path: Path, summary_md: str) -> None:
     """Update the summary block inside agent.md with the provided content."""
-
     if path.exists():
         raw = path.read_text(encoding="utf-8")
     else:
@@ -72,7 +66,6 @@ def write_summary_block(path: Path, summary_md: str) -> None:
 
 def clear_summary_block_file(path: Path) -> None:
     """Replace the summary block with the placeholder string."""
-
     if path.exists():
         raw = path.read_text(encoding="utf-8")
     else:
@@ -90,7 +83,6 @@ def apply_handoff_acceptance(
     parent_thread_id: str,
 ) -> str:
     """Persist the accepted summary and create the handoff child thread."""
-
     thread_manager = session_state.thread_manager
     agent_md_path = thread_manager.agent_dir / "agent.md"
     write_summary_block(agent_md_path, summary_md)
@@ -123,21 +115,23 @@ def apply_handoff_acceptance(
         "last_cleanup_at": None,
     }
 
-    thread_manager.update_thread_metadata(parent_thread_id, {"handoff": base_metadata | parent_flags})
+    thread_manager.update_thread_metadata(
+        parent_thread_id, {"handoff": base_metadata | parent_flags}
+    )
     thread_manager.update_thread_metadata(child_thread_id, {"handoff": base_metadata | child_flags})
 
     return child_thread_id
 
 
 __all__ = [
-    "apply_handoff_acceptance",
-    "ensure_summary_section",
-    "replace_summary_block",
-    "write_summary_block",
-    "clear_summary_block",
-    "clear_summary_block_file",
-    "render_summary_markdown",
-    "SUMMARY_START_TAG",
     "SUMMARY_END_TAG",
     "SUMMARY_PLACEHOLDER",
+    "SUMMARY_START_TAG",
+    "apply_handoff_acceptance",
+    "clear_summary_block",
+    "clear_summary_block_file",
+    "ensure_summary_section",
+    "render_summary_markdown",
+    "replace_summary_block",
+    "write_summary_block",
 ]

@@ -8,7 +8,6 @@ from pathlib import Path
 
 def _ensure_workspace_on_path() -> None:
     """Add the monorepo root/libs to sys.path when running from sources."""
-
     current = Path(__file__).resolve()
     workspace_root = None
 

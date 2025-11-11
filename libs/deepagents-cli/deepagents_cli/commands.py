@@ -3,12 +3,9 @@
 import asyncio
 import logging
 import os
-import shlex
 import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -221,8 +218,6 @@ async def _enrich_threads_with_metrics(
     return threads
 
 
-
-
 def _enrich_thread_with_server_data(thread: dict) -> dict:
     """Enrich thread metadata with data from server API.
 
@@ -291,7 +286,9 @@ def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
 
 
-async def _select_thread_with_questionary(threads, current_thread_id: str | None) -> tuple[str, str] | tuple[None, None]:
+async def _select_thread_with_questionary(
+    threads, current_thread_id: str | None
+) -> tuple[str, str] | tuple[None, None]:
     """Interactive thread picker using questionary with arrow key navigation.
 
     Args:
@@ -306,19 +303,24 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
 
     # Custom style matching CLI color scheme
     # Key insight from questionary docs: highlighted needs BACKGROUND color to be visually obvious
-    custom_style = Style([
-        ('qmark', f'fg:{COLORS["primary"]} bold'),
-        ('question', 'bold'),
-        ('answer', f'fg:{COLORS["primary"]} bold'),
-        ('pointer', f'fg:{COLORS["primary"]} bold'),
-        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),  # White text on green background
-        ('selected', f'fg:{COLORS["primary"]}'),
-        ('instruction', 'fg:#888888 italic'),
-        ('text', ''),
-        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
-        ('search_none', 'fg:#888888'),  # No search results message
-        ('separator', 'fg:#888888'),  # Separators in lists
-    ])
+    custom_style = Style(
+        [
+            ("qmark", f"{COLORS['primary']} bold"),
+            ("question", "bold"),
+            ("answer", f"{COLORS['primary']} bold"),
+            ("pointer", f"{COLORS['primary']} bold"),
+            (
+                "highlighted",
+                f"#ffffff bg:{COLORS['primary']} bold",
+            ),  # White text on green background
+            ("selected", f"{COLORS['primary']}"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", f"{COLORS['primary']}"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
 
     console.print()
 
@@ -348,7 +350,9 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
             style=custom_style,
             qmark="▶",
             pointer="●",
-            instruction="(↑↓ navigate, Enter select, type to search)" if len(threads) > 10 else "(↑↓ navigate, Enter select)",
+            instruction="(↑↓ navigate, Enter select, type to search)"
+            if len(threads) > 10
+            else "(↑↓ navigate, Enter select)",
         ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
@@ -371,19 +375,21 @@ async def _select_thread_with_questionary(threads, current_thread_id: str | None
     console.print()
 
     # Action menu style - same background highlighting
-    action_style = Style([
-        ('qmark', f'fg:{COLORS["primary"]} bold'),
-        ('question', 'bold'),
-        ('answer', f'fg:{COLORS["primary"]} bold'),
-        ('pointer', f'fg:{COLORS["primary"]} bold'),
-        ('highlighted', f'fg:#ffffff bg:{COLORS["primary"]} bold'),  # Consistent highlighting
-        ('selected', f'fg:{COLORS["primary"]}'),
-        ('instruction', 'fg:#888888 italic'),
-        ('text', ''),
-        ('search_success', f'fg:{COLORS["primary"]}'),  # Successful search results
-        ('search_none', 'fg:#888888'),  # No search results message
-        ('separator', 'fg:#888888'),  # Separators in lists
-    ])
+    action_style = Style(
+        [
+            ("qmark", f"{COLORS['primary']} bold"),
+            ("question", "bold"),
+            ("answer", f"{COLORS['primary']} bold"),
+            ("pointer", f"{COLORS['primary']} bold"),
+            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),  # Consistent highlighting
+            ("selected", f"{COLORS['primary']}"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", f"{COLORS['primary']}"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
 
     action_choices = [
         Choice(title="↻  Switch to this thread", value="switch"),
@@ -428,13 +434,15 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
     from questionary import Style
 
     # Warning style for deletion confirmation
-    warning_style = Style([
-        ('qmark', 'fg:#f59e0b bold'),  # Amber/orange for warning
-        ('question', 'bold'),
-        ('answer', 'fg:#ef4444 bold'),  # Red for destructive action
-        ('instruction', 'fg:#888888 italic'),
-        ('text', ''),
-    ])
+    warning_style = Style(
+        [
+            ("qmark", "#f59e0b bold"),  # Amber/orange for warning
+            ("question", "bold"),
+            ("answer", "#ef4444 bold"),  # Red for destructive action
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+        ]
+    )
 
     thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
@@ -450,14 +458,14 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
         token_display = f"{tokens:,}"
 
     console.print()
-    console.print(f"[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
+    console.print("[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
     console.print()
     console.print(f"[bold]Thread:[/bold] {thread_name} [dim]({short_id})[/dim]")
     console.print()
     console.print("[dim]This will permanently delete:[/dim]")
     console.print(f"[dim]  • All conversation history ({trace_count} traces)[/dim]")
     console.print(f"[dim]  • {token_display} tokens of context[/dim]")
-    console.print(f"[dim]  • Cannot be undone[/dim]")
+    console.print("[dim]  • Cannot be undone[/dim]")
     console.print()
 
     try:
@@ -483,7 +491,9 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
     return True
 
 
-async def _select_thread_interactively(threads, current_thread_id: str | None) -> tuple[str, str] | tuple[None, None]:
+async def _select_thread_interactively(
+    threads, current_thread_id: str | None
+) -> tuple[str, str] | tuple[None, None]:
     """Present an interactive picker to choose a thread and action.
 
     Returns tuple of (thread_id, action) where action is 'switch', 'delete', or 'rename'.
@@ -585,13 +595,15 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
             from questionary import Style
 
             # Custom style for rename
-            rename_style = Style([
-                ('qmark', f'fg:{COLORS["primary"]} bold'),
-                ('question', 'bold'),
-                ('answer', f'fg:{COLORS["primary"]} bold'),
-                ('instruction', 'fg:#888888 italic'),
-                ('text', ''),
-            ])
+            rename_style = Style(
+                [
+                    ("qmark", f"{COLORS['primary']} bold"),
+                    ("question", "bold"),
+                    ("answer", f"{COLORS['primary']} bold"),
+                    ("instruction", "#888888 italic"),
+                    ("text", ""),
+                ]
+            )
 
             console.print()
             try:
@@ -672,10 +684,9 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
 
     # Use execute_task to properly handle state-based interrupts via streaming
     # This follows LangChain v1 best practices for interrupt handling
-    from .execution import execute_task
 
     user_input = "Please call the request_handoff tool to initiate thread handoff."
-    
+
     await execute_task(
         user_input=user_input,
         agent=agent,
@@ -736,6 +747,22 @@ async def handle_command(
             )
             console.print()
 
+        return True
+
+    if base_cmd == "menu" or base_cmd == "m":
+        # Open main menu
+        if not session_state:
+            console.print()
+            console.print("[red]Session state not available[/red]")
+            console.print()
+            return True
+
+        from .menu_system import MenuSystem
+
+        menu_system = MenuSystem(session_state, agent, token_tracker)
+        result = await menu_system.show_main_menu()
+        if result == "exit":
+            return "exit"
         return True
 
     if base_cmd == "help":

@@ -15,14 +15,12 @@ import requests
 
 from .config import SERVER_REQUEST_TIMEOUT
 
-
 _STARTED_SERVER_PROCESS: subprocess.Popen[bytes] | None = None
 _CLEANUP_REGISTERED = False
 
 
 def _register_server_cleanup(process: subprocess.Popen[bytes]) -> None:
     """Register an atexit handler to terminate the spawned dev server."""
-
     global _STARTED_SERVER_PROCESS, _CLEANUP_REGISTERED
     _STARTED_SERVER_PROCESS = process
 
@@ -33,7 +31,6 @@ def _register_server_cleanup(process: subprocess.Popen[bytes]) -> None:
 
 def _cleanup_started_server() -> None:
     """Terminate the LangGraph dev server started by the CLI."""
-
     global _STARTED_SERVER_PROCESS
 
     process = _STARTED_SERVER_PROCESS
@@ -65,7 +62,6 @@ def _request(
     json: Any | None = None,
 ) -> requests.Response:
     """Internal helper for LangGraph requests with consistent handling."""
-
     url = f"{server_url or get_server_url()}{path}"
     timeout = timeout or SERVER_REQUEST_TIMEOUT
 
@@ -287,7 +283,7 @@ def start_server_if_needed() -> tuple[bool, str | None]:
     try:
         log_file = tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log")
 
-        process = subprocess.Popen(  # noqa: S603
+        process = subprocess.Popen(
             ["langgraph", "dev"],
             stdout=log_file,
             stderr=subprocess.STDOUT,

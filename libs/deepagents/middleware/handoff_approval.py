@@ -13,8 +13,7 @@ Key Principles:
 
 from __future__ import annotations
 
-from typing import Annotated, Any
-from typing_extensions import NotRequired
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.agents.middleware.types import PrivateStateAttr
@@ -29,6 +28,7 @@ class HandoffState(AgentState):
 
     Includes internal coordination fields for handoff proposal and approval flow.
     """
+
     _handoff_proposal: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
     handoff_decision: NotRequired[dict[str, Any] | None]
     handoff_approved: NotRequired[bool]
@@ -81,6 +81,15 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         Pattern Reference: Iterative validation loop
         https://langchain-ai.github.io/langgraph/how-tos/human-in-the-loop/add-human-in-the-loop/#iterative-validation
 
+        Metadata Emission:
+        Emits observability metadata to LangSmith traces for each iteration:
+        - handoff.iteration: Current refinement iteration number (0-indexed)
+        - handoff.is_replay: Whether this is a replay from checkpoint (bool)
+        - handoff.cache_hit: Whether cached summary was used vs LLM regeneration (bool)
+        - handoff.refinement_count: Total number of cached refinements (int)
+        - handoff.user_action: User's decision (approve/refine/reject) after interrupt
+        - handoff.refinement_feedback: User's feedback text when action=refine
+
         Args:
             state: Current agent state
             runtime: Runtime context
@@ -89,6 +98,8 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
             State update with final approval decision
         """
         import logging
+
+        from langchain_core.callbacks.manager import get_callback_manager_for_config
 
         logger = logging.getLogger(__name__)
 
@@ -158,6 +169,25 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                 "refinement_count": len(refinement_cache),
             }
 
+            # Emit metadata to LangSmith trace for observability
+            # Use inherit=False to scope metadata to this specific iteration
+            config = getattr(runtime, "config", None)
+            if config and (callbacks := config.get("callbacks")):
+                try:
+                    callback_manager = get_callback_manager_for_config(config)
+                    if callback_manager:
+                        callback_manager.add_metadata(
+                            {
+                                "handoff.iteration": iteration,
+                                "handoff.is_replay": is_replay,
+                                "handoff.cache_hit": cache_hit,
+                                "handoff.refinement_count": len(refinement_cache),
+                            },
+                            inherit=False,
+                        )
+                except Exception as e:
+                    logger.debug(f"Failed to emit metadata to LangSmith: {e}")
+
             # Build interrupt payload with current summary and observability metadata
             interrupt_payload = {
                 "action": "approve_handoff",
@@ -185,6 +215,18 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
             # Extract action type
             action_type = resume_data.get("type", "reject")
 
+            # Emit metadata for user action
+            if config and (callbacks := config.get("callbacks")):
+                try:
+                    callback_manager = get_callback_manager_for_config(config)
+                    if callback_manager:
+                        user_action_metadata = {"handoff.user_action": action_type}
+                        if action_type == "refine" and (feedback := resume_data.get("feedback")):
+                            user_action_metadata["handoff.refinement_feedback"] = feedback[:200]  # Truncate
+                        callback_manager.add_metadata(user_action_metadata, inherit=False)
+                except Exception as e:
+                    logger.debug(f"Failed to emit user action metadata: {e}")
+
             if action_type == "approve":
                 # User approved - exit loop with approval
                 logger.info("Handoff approved by user")
@@ -202,7 +244,7 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                     "handoff_approved": True,
                 }
 
-            elif action_type == "refine":
+            if action_type == "refine":
                 # User wants refinement - regenerate summary with feedback
                 feedback = resume_data.get("feedback", "")
 
@@ -227,9 +269,33 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                     current_summary = refinement_cache[iteration]
                     cache_hit = True
                     logger.info(f"Using cached summary for iteration {iteration}")
+
+                    # Emit cache hit metadata
+                    if config and (callbacks := config.get("callbacks")):
+                        try:
+                            callback_manager = get_callback_manager_for_config(config)
+                            if callback_manager:
+                                callback_manager.add_metadata(
+                                    {"handoff.llm_regeneration": False, "handoff.cache_used": True},
+                                    inherit=False,
+                                )
+                        except Exception as e:
+                            logger.debug(f"Failed to emit cache metadata: {e}")
                 else:
                     # Generate new summary and cache it
                     try:
+                        # Emit LLM call metadata before regeneration
+                        if config and (callbacks := config.get("callbacks")):
+                            try:
+                                callback_manager = get_callback_manager_for_config(config)
+                                if callback_manager:
+                                    callback_manager.add_metadata(
+                                        {"handoff.llm_regeneration": True, "handoff.cache_used": False},
+                                        inherit=False,
+                                    )
+                            except Exception as e:
+                                logger.debug(f"Failed to emit LLM call metadata: {e}")
+
                         # Regenerate summary using LLM with user feedback
                         # This method now includes retry logic with exponential backoff
                         current_summary = self._regenerate_summary_with_feedback(
@@ -243,25 +309,36 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
                         logger.info(f"Cached new summary for iteration {iteration}")
                     except Exception as e:
                         logger.error(f"Failed to regenerate summary: {e}")
+                        # Emit error metadata
+                        if config and (callbacks := config.get("callbacks")):
+                            try:
+                                callback_manager = get_callback_manager_for_config(config)
+                                if callback_manager:
+                                    callback_manager.add_metadata(
+                                        {"handoff.regeneration_error": str(e)[:200]},
+                                        inherit=False,
+                                    )
+                            except Exception as meta_err:
+                                logger.debug(f"Failed to emit error metadata: {meta_err}")
                         # Loop again with same summary (let user try again or cancel)
                         continue
 
                 # Loop back to interrupt() with updated summary
                 continue
 
-            else:  # reject or unknown
-                # User rejected or invalid action - exit loop with rejection
-                logger.info(f"Handoff rejected by user (action: {action_type})")
-                return {
-                    "_handoff_proposal": None,
-                    "handoff_decision": {
-                        "type": "reject",
-                        "approved": False,
-                        "message": resume_data.get("message", "Handoff rejected by user"),
-                        "resume_data": resume_data,
-                    },
-                    "handoff_approved": False,
-                }
+            # reject or unknown
+            # User rejected or invalid action - exit loop with rejection
+            logger.info(f"Handoff rejected by user (action: {action_type})")
+            return {
+                "_handoff_proposal": None,
+                "handoff_decision": {
+                    "type": "reject",
+                    "approved": False,
+                    "message": resume_data.get("message", "Handoff rejected by user"),
+                    "resume_data": resume_data,
+                },
+                "handoff_approved": False,
+            }
 
     def _regenerate_summary_with_feedback(
         self,
@@ -291,14 +368,14 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         import logging
         import time
 
+        # Import here to avoid circular dependency
+        from langchain.chat_models import init_chat_model
+
         from deepagents.middleware.handoff_summarization import (
             _messages_to_prompt,
             _split_sentences,
             render_summary_markdown,
         )
-
-        # Import here to avoid circular dependency
-        from langchain.chat_models import init_chat_model
 
         logger = logging.getLogger(__name__)
 
@@ -367,14 +444,11 @@ Generate the refined summary now:"""
 
                 # If this was the last attempt, fall back to original
                 if attempt >= max_retries:
-                    logger.error(
-                        f"All {max_retries + 1} LLM invocation attempts failed. "
-                        f"Falling back to original summary."
-                    )
+                    logger.error(f"All {max_retries + 1} LLM invocation attempts failed. Falling back to original summary.")
                     return original_summary
 
                 # Calculate exponential backoff delay
-                delay = initial_delay * (backoff_factor ** attempt)
+                delay = initial_delay * (backoff_factor**attempt)
                 logger.info(f"Retrying in {delay:.1f}s...")
                 time.sleep(delay)
 

@@ -62,6 +62,9 @@ deepagents
 # Use specific agent
 deepagents --agent myagent
 
+# Legacy shorthand (equivalent to --agent)
+deepagents myagent
+
 # Auto-approve mode (no prompts)
 deepagents --auto-approve
 

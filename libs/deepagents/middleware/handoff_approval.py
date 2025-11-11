@@ -99,7 +99,7 @@ class HandoffApprovalMiddleware(AgentMiddleware[HandoffState]):
         """
         import logging
 
-        from langchain_core.callbacks.manager import get_callback_manager_for_config
+        from langchain_core.runnables.config import get_callback_manager_for_config
 
         logger = logging.getLogger(__name__)
 

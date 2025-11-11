@@ -138,7 +138,7 @@ def get_bottom_toolbar(
             if session:
                 current_text = session.default_buffer.text
                 if current_text.startswith("!"):
-                    parts.append(("bg:#ff1493 fg:#ffffff bold", " BASH MODE "))
+                    parts.append(("bg:#ff1493 #ffffff bold", " BASH MODE "))
                     parts.append(("", " | "))
         except (AttributeError, TypeError):
             # Silently ignore - toolbar is non-critical and called frequently
@@ -175,6 +175,13 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         session_state.toggle_auto_approve()
         # Force UI refresh to update toolbar
         event.app.invalidate()
+
+    # Bind Ctrl+M to open main menu
+    @kb.add("c-m")
+    def _(event) -> None:
+        """Open main menu."""
+        session_state.menu_requested = True
+        event.app.exit()  # Exit current prompt to trigger menu in main loop
 
     # Bind regular Enter to submit (intuitive behavior)
     @kb.add("enter")

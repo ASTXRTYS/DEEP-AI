@@ -10,6 +10,8 @@ a **planning tool**, **sub agents**, access to a **file system**, and a **detail
 
 `deepagents` is a Python package that implements these in a general purpose way so that you can easily create a Deep Agent for your application. For a full overview and quickstart of `deepagents`, the best resource is our [docs](https://docs.langchain.com/oss/python/deepagents/overview).
 
+> **Mandatory Agent Protocol:** Any agent or automation touching this repository **must read and follow** [`AGENT.md`](AGENT.md) before editing files, running tools, or opening pull requests. Treat that document as the operating agreement for all work here.
+
 **Acknowledgements: This project was primarily inspired by Claude Code, and initially was largely an attempt to see what made Claude Code general purpose, and make it even more so.**
 
 ## Installation

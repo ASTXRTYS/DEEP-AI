@@ -2,10 +2,8 @@
 
 import asyncio
 import json
-import sys
-import termios
-import tty
-from datetime import UTC, datetime
+import logging
+from datetime import UTC
 from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -17,6 +15,7 @@ from rich.panel import Panel
 from .config import COLORS, console
 from .file_ops import FileOpTracker, build_approval_preview
 from .input import parse_file_mentions
+from .thread_store import ThreadStoreError
 from .ui import (
     TokenTracker,
     format_tool_display,
@@ -25,6 +24,8 @@ from .ui import (
     render_file_operation,
     render_todo_list,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _unwrap_interrupt(data: Any) -> dict | None:
@@ -69,8 +70,15 @@ def _extract_tool_args(action_request: dict) -> dict | None:
     return None
 
 
-def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
-    """Prompt user to approve/reject a tool action with arrow key navigation."""
+async def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
+    """Prompt user to approve/reject a tool action with questionary.
+
+    NOTE: This function is now async to support questionary's async API.
+    Callers must await this function.
+    """
+    import questionary
+    from questionary import Choice, Style
+
     description = action_request.get("description", "No description available")
     tool_name = action_request.get("name") or action_request.get("tool")
     tool_args = _extract_tool_args(action_request)
@@ -99,90 +107,48 @@ def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> 
         console.print()
         render_diff_block(preview.diff, preview.diff_title or preview.title)
 
-    options = ["approve", "reject"]
-    selected = 0  # Start with approve selected
+    # Questionary style for HITL approval
+    approval_style = Style(
+        [
+            ("qmark", "#10b981 bold"),
+            ("question", "bold"),
+            ("answer", "#10b981 bold"),
+            ("pointer", "#10b981 bold"),
+            ("highlighted", "#ffffff bg:#10b981 bold"),  # White on green
+            ("selected", "#10b981"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", "#10b981"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
 
+    console.print()
     try:
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
+        decision = await questionary.select(
+            "Choose an action:",
+            choices=[
+                Choice(title="✓  Approve (allow this tool to run)", value="approve"),
+                Choice(title="✕  Reject (block this tool)", value="reject"),
+            ],
+            default="approve",
+            use_arrow_keys=True,
+            use_indicator=True,
+            use_shortcuts=True,  # Allow 'a' and 'r' shortcuts
+            style=approval_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select, or press a/r)",
+        ).ask_async()
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        console.print("[dim]✓ Approval cancelled - tool rejected.[/dim]")
+        console.print()
+        return {"type": "reject", "message": "User cancelled approval"}
 
-        try:
-            tty.setraw(fd)
-            # Hide cursor during menu interaction
-            sys.stdout.write("\033[?25l")
-            sys.stdout.flush()
-
-            # Initial render flag
-            first_render = True
-
-            while True:
-                if not first_render:
-                    # Move cursor back to start of menu (up 2 lines, then to start of line)
-                    sys.stdout.write("\033[2A\r")
-
-                first_render = False
-
-                # Display options vertically with ANSI color codes
-                for i, option in enumerate(options):
-                    sys.stdout.write("\r\033[K")  # Clear line from cursor to end
-
-                    if i == selected:
-                        if option == "approve":
-                            # Green bold with filled checkbox
-                            sys.stdout.write("\033[1;32m☑ Approve\033[0m\n")
-                        else:
-                            # Red bold with filled checkbox
-                            sys.stdout.write("\033[1;31m☑ Reject\033[0m\n")
-                    elif option == "approve":
-                        # Dim with empty checkbox
-                        sys.stdout.write("\033[2m☐ Approve\033[0m\n")
-                    else:
-                        # Dim with empty checkbox
-                        sys.stdout.write("\033[2m☐ Reject\033[0m\n")
-
-                sys.stdout.flush()
-
-                # Read key
-                char = sys.stdin.read(1)
-
-                if char == "\x1b":  # ESC sequence (arrow keys)
-                    next1 = sys.stdin.read(1)
-                    next2 = sys.stdin.read(1)
-                    if next1 == "[":
-                        if next2 == "B":  # Down arrow
-                            selected = (selected + 1) % len(options)
-                        elif next2 == "A":  # Up arrow
-                            selected = (selected - 1) % len(options)
-                elif char in {"\r", "\n"}:  # Enter
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-                elif char == "\x03":  # Ctrl+C
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    raise KeyboardInterrupt
-                elif char.lower() == "a":
-                    selected = 0
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-                elif char.lower() == "r":
-                    selected = 1
-                    sys.stdout.write("\r\n")  # Move to start of line and add newline
-                    break
-
-        finally:
-            # Show cursor again
-            sys.stdout.write("\033[?25h")
-            sys.stdout.flush()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    except (termios.error, AttributeError):
-        # Fallback for non-Unix systems
-        console.print("  ☐ (A)pprove  (default)")
-        console.print("  ☐ (R)eject")
-        choice = input("\nChoice (A/R, default=Approve): ").strip().lower()
-        selected = 1 if choice in {"r", "reject"} else 0
-
-    # Return decision based on selection
-    if selected == 0:
+    console.print()
+    if decision == "approve":
         return {"type": "approve"}
     return {"type": "reject", "message": "User rejected the command"}
 
@@ -221,20 +187,32 @@ async def execute_task(
     if session_state and session_state.thread_manager:
         thread_id = session_state.thread_manager.get_current_thread_id()
 
+    # Build configurable section (execution parameters only)
     config_configurable = {"thread_id": thread_id}
+    if assistant_id:
+        config_configurable["assistant_id"] = assistant_id
 
     handoff_trace_metadata: dict[str, Any] | None = None
 
     def base_run_metadata() -> dict[str, Any]:
-        """Capture latest thread metadata for runtime config."""
-        metadata: dict[str, Any] = {"thread_id": thread_id}
-        if assistant_id:
-            metadata["assistant_id"] = assistant_id
+        """Capture workflow-specific metadata for LangSmith tracing.
+
+        NOTE: thread_id and assistant_id are in configurable, not here.
+        This follows LangGraph best practices - configurable for execution
+        parameters, metadata for observability/tracing context only.
+        """
+        metadata: dict[str, Any] = {}
 
         if session_state and session_state.thread_manager:
             try:
                 thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
-            except Exception:
+            except (ThreadStoreError, OSError, json.JSONDecodeError) as e:
+                # Non-fatal: metadata enrichment is optional for tracing
+                logger.warning(
+                    "Failed to retrieve thread metadata for tracing context",
+                    exc_info=True,
+                    extra={"thread_id": thread_id, "error_type": type(e).__name__},
+                )
                 thread_meta = None
 
             if thread_meta:
@@ -251,7 +229,12 @@ async def execute_task(
         return metadata
 
     def build_run_config(*, with_trace_metadata: bool = True) -> dict[str, Any]:
-        """Compose per-run config metadata for LangSmith tracing."""
+        """Compose per-run config for graph execution.
+
+        Returns RunnableConfig with:
+        - configurable: Execution parameters (thread_id, assistant_id)
+        - metadata: Workflow-specific tracing context (handoff state, etc.)
+        """
         metadata = base_run_metadata()
         if with_trace_metadata and handoff_trace_metadata:
             metadata.update(handoff_trace_metadata)
@@ -311,7 +294,7 @@ async def execute_task(
     # We still set the config flags above; middlewares will emit an interrupt
     # which the streaming loop handles. We intentionally avoid any synchronous
     # summary generation here to ensure proper tracing and UX.
-    
+
     # Stream input - may need to loop if there are interrupts
     stream_input = {"messages": [{"role": "user", "content": final_input}]}
 
@@ -351,11 +334,11 @@ async def execute_task(
                     # Extract chunk_data from updates for todo/proposal checking
                     # Debug: Check all values in data dict for handoff state
                     chunk_data = next(iter(data.values())) if data else None
-                    
+
                     # Also check if handoff state is directly in data (not nested)
                     if not chunk_data and isinstance(data, dict):
                         chunk_data = data
-                    
+
                     if chunk_data and isinstance(chunk_data, dict):
                         # Check for todo updates
                         if "todos" in chunk_data:
@@ -592,14 +575,16 @@ async def execute_task(
                     proposal = HandoffProposal(
                         handoff_id=hitl_request.get("handoff_id", ""),
                         summary_json=hitl_request.get("summary_json", {}),
-                        summary_md=hitl_request.get("summary", ""),  # "summary" key in interrupt payload
+                        summary_md=hitl_request.get(
+                            "summary", ""
+                        ),  # "summary" key in interrupt payload
                         parent_thread_id=hitl_request.get("parent_thread_id", ""),
                         assistant_id=hitl_request.get("assistant_id", ""),
                     )
 
                     # Get user decision (approve/refine/reject)
-                    decision_result = await asyncio.to_thread(
-                        prompt_handoff_decision,
+                    # prompt_handoff_decision is now async, so await directly
+                    decision_result = await prompt_handoff_decision(
                         proposal,
                         preview_only=False,
                     )
@@ -607,20 +592,25 @@ async def execute_task(
                     # Build resume data in format HandoffApprovalMiddleware expects
                     if decision_result.type == "approve":
                         # User approved - send approval to middleware
-                        decisions.append({
-                            "type": "approve",
-                        })
+                        decisions.append(
+                            {
+                                "type": "approve",
+                            }
+                        )
 
                         # Prepare handoff but DON'T switch thread yet
                         try:
-                            from deepagents_cli.handoff_persistence import apply_handoff_acceptance
                             from deepagents.middleware.handoff_summarization import HandoffSummary
+
+                            from deepagents_cli.handoff_persistence import apply_handoff_acceptance
 
                             parent_thread_id = hitl_request.get("parent_thread_id", "")
                             hsum = HandoffSummary(
                                 handoff_id=hitl_request.get("handoff_id", ""),
-                                summary_json=decision_result.summary_json or hitl_request.get("summary_json", {}),
-                                summary_md=decision_result.summary_md or hitl_request.get("summary", ""),
+                                summary_json=decision_result.summary_json
+                                or hitl_request.get("summary_json", {}),
+                                summary_md=decision_result.summary_md
+                                or hitl_request.get("summary", ""),
                             )
 
                             child_id = apply_handoff_acceptance(
@@ -634,34 +624,47 @@ async def execute_task(
                             # Store child_id for deferred switching (AFTER stream completes)
                             session_state.pending_handoff_child_id = child_id
                             console.print()
-                            console.print(f"[green]✓ Handoff approved. Processing...[/green]")
+                            console.print("[green]✓ Handoff approved. Processing...[/green]")
                             console.print()
 
                             # Don't return here - must continue to where Command(resume=...)
                             # is sent to deliver the approval decision to the middleware.
                             # Thread switching will happen in main.py after execute_task() completes.
 
-                        except Exception:  # pragma: no cover - defensive
-                            # Non-fatal persistence errors shouldn't crash the run
-                            pass
+                        except (ValueError, OSError, json.JSONDecodeError) as e:
+                            logger.warning(
+                                "Failed to persist handoff acceptance",
+                                extra={
+                                    "error": str(e),
+                                    "error_type": type(e).__name__,
+                                    "parent_thread_id": parent_thread_id,
+                                    "handoff_id": hitl_request.get("handoff_id", ""),
+                                },
+                            )
+                            # Continue - user already approved, middleware has resume decision
+                            # Handoff will still complete via middleware, persistence failure is non-fatal
 
                     elif decision_result.type == "refine":
                         # User wants refinement - send feedback to middleware
                         # Middleware will regenerate and interrupt again with new summary
-                        decisions.append({
-                            "type": "refine",
-                            "feedback": decision_result.feedback or "",
-                        })
+                        decisions.append(
+                            {
+                                "type": "refine",
+                                "feedback": decision_result.feedback or "",
+                            }
+                        )
                         console.print()
                         console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
                         console.print()
 
                     else:  # reject
                         # User rejected - send rejection to middleware
-                        decisions.append({
-                            "type": "reject",
-                            "message": "User declined handoff",
-                        })
+                        decisions.append(
+                            {
+                                "type": "reject",
+                                "message": "User declined handoff",
+                            }
+                        )
 
                 # Handle other HITL actions (tool approvals) with legacy schema
                 else:
@@ -691,8 +694,8 @@ async def execute_task(
                                 status.stop()
                                 spinner_active = False
 
-                            decision = await asyncio.to_thread(
-                                prompt_for_tool_approval,
+                            # prompt_for_tool_approval is now async, so await directly
+                            decision = await prompt_for_tool_approval(
                                 action_request,
                                 assistant_id,
                             )
@@ -700,9 +703,7 @@ async def execute_task(
 
                 # Suppress output if any action was rejected (but NOT for refine - that continues the loop)
                 # For handoff decisions, check "type"; for tool approvals, check "type"
-                suppress_resumed_output = any(
-                    d.get("type") == "reject" for d in decisions
-                )
+                suppress_resumed_output = any(d.get("type") == "reject" for d in decisions)
 
                 # Format resume data based on what type of interrupt occurred
                 if hitl_request and hitl_request.get("action") == "approve_handoff":
@@ -790,8 +791,16 @@ async def execute_task(
                     session_state.thread_manager.update_token_count(
                         thread_id, token_tracker.current_context
                     )
-                except Exception:  # pragma: no cover - defensive
-                    pass
+                except (ValueError, OSError, json.JSONDecodeError) as e:
+                    logger.debug(
+                        "Failed to update token count",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                            "thread_id": thread_id,
+                        },
+                    )
+                    # Non-critical - token tracking is for display only via /tokens command
 
     # Check for handoff cleanup flag and clear summary block if needed
     if session_state and session_state.thread_manager and thread_id:
@@ -800,8 +809,9 @@ async def execute_task(
             final_state = await agent.aget_state(build_run_config(with_trace_metadata=False))
             if final_state and final_state.values.get("_handoff_cleanup_pending"):
                 # Clear the summary block from agent.md
+                from datetime import datetime
+
                 from deepagents_cli.handoff_persistence import clear_summary_block_file
-                from datetime import datetime, timezone
 
                 agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
                 clear_summary_block_file(agent_md_path)
@@ -814,18 +824,37 @@ async def execute_task(
                     updated_handoff = existing_handoff | {
                         "pending": False,
                         "cleanup_required": False,
-                        "last_cleanup_at": datetime.now(timezone.utc).isoformat(),
+                        "last_cleanup_at": datetime.now(UTC).isoformat(),
                     }
                     session_state.thread_manager.update_thread_metadata(
                         thread_id,
                         {"handoff": updated_handoff},
                     )
-        except Exception:  # pragma: no cover - defensive
-            pass
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            logger.warning(
+                "Failed to clean up handoff state",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "thread_id": thread_id,
+                    "operation": "clear_summary_block_file",
+                },
+            )
+            # Non-fatal - stale handoff metadata won't break functionality
+            # Next handoff will overwrite or cleanup will retry on next execution
 
     # Touch the thread so cleanup/TTL logic sees recent activity
     if session_state and session_state.thread_manager and thread_id:
         try:
             session_state.thread_manager.touch_thread(thread_id, reason="interaction")
-        except Exception:  # pragma: no cover - defensive
-            pass
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            logger.debug(
+                "Failed to touch thread timestamp",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "thread_id": thread_id,
+                    "reason": "interaction",
+                },
+            )
+            # Non-critical - TTL tracking is best-effort for cleanup scheduling

@@ -5,8 +5,8 @@ from deepagents.middleware.filesystem_permission import handle_filesystem_permis
 from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
 from deepagents.middleware.handoff_cleanup import HandoffCleanupMiddleware
 from deepagents.middleware.handoff_summarization import (
-    HandoffSummary,
     HandoffSummarizationMiddleware,
+    HandoffSummary,
     generate_handoff_summary,
 )
 from deepagents.middleware.handoff_tool import HandoffToolMiddleware, request_handoff
@@ -19,14 +19,14 @@ __all__ = [
     "FilesystemMiddleware",
     "HandoffApprovalMiddleware",
     "HandoffCleanupMiddleware",
-    "HandoffSummary",
     "HandoffSummarizationMiddleware",
+    "HandoffSummary",
     "HandoffToolMiddleware",
+    "ResumableShellToolMiddleware",
     "SafeAnthropicPromptCachingMiddleware",
+    "SubAgent",
+    "SubAgentMiddleware",
     "generate_handoff_summary",
     "handle_filesystem_permissions",
     "request_handoff",
-    "ResumableShellToolMiddleware",
-    "SubAgent",
-    "SubAgentMiddleware",
 ]

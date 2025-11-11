@@ -3,12 +3,9 @@
 import asyncio
 import logging
 import os
-import shlex
 import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -221,8 +218,6 @@ async def _enrich_threads_with_metrics(
     return threads
 
 
-
-
 def _enrich_thread_with_server_data(thread: dict) -> dict:
     """Enrich thread metadata with data from server API.
 
@@ -291,58 +286,226 @@ def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
 
 
-def _select_thread_interactively(threads, current_thread_id: str | None) -> str | None:
-    """Present an interactive picker to choose a thread.
+async def _select_thread_with_questionary(
+    threads, current_thread_id: str | None
+) -> tuple[str, str] | tuple[None, None]:
+    """Interactive thread picker using questionary with arrow key navigation.
 
-    Uses a simple numbered list for reliable selection across all terminals.
-    Returns the selected thread ID, or ``None`` if the selection was cancelled.
+    Args:
+        threads: List of thread metadata dicts
+        current_thread_id: ID of currently active thread
+
+    Returns:
+        Tuple of (thread_id, action) or (None, None) if cancelled
     """
-    if not threads:
-        return None
+    import questionary
+    from questionary import Choice, Style
 
-    return _select_thread_fallback(threads, current_thread_id)
+    # Custom style matching CLI color scheme
+    # Key insight from questionary docs: highlighted needs BACKGROUND color to be visually obvious
+    custom_style = Style(
+        [
+            ("qmark", f"{COLORS['primary']} bold"),
+            ("question", "bold"),
+            ("answer", f"{COLORS['primary']} bold"),
+            ("pointer", f"{COLORS['primary']} bold"),
+            (
+                "highlighted",
+                f"#ffffff bg:{COLORS['primary']} bold",
+            ),  # White text on green background
+            ("selected", f"{COLORS['primary']}"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", f"{COLORS['primary']}"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
 
-
-def _select_thread_fallback(threads, current_thread_id: str | None) -> str | None:
-    """Fallback selection that works without raw TTY capabilities."""
     console.print()
-    console.print("Select a thread:")
 
-    default_index = 0
-    if current_thread_id:
-        for idx, thread in enumerate(threads):
-            if thread["id"] == current_thread_id:
-                default_index = idx
-                break
+    # Build choices with formatted display
+    choices = []
+    default_choice = None
 
-    for idx, thread in enumerate(threads, start=1):
+    for thread in threads:
         summary = _format_thread_summary(thread, current_thread_id)
-        selector = "*" if idx - 1 == default_index else " "
-        console.print(f"  [{selector}] {idx}. {summary}")
+        choice = Choice(title=summary, value=thread["id"])
+        choices.append(choice)
 
-    console.print()
-    prompt = f"Choice (1-{len(threads)}; Enter to cancel) [default={default_index + 1}]: "
+        # Mark current thread as default
+        if thread["id"] == current_thread_id:
+            default_choice = choice
+
+    # Step 1: Select thread with search filtering for large lists
     try:
-        choice = input(prompt).strip()
+        selected_id = await questionary.select(
+            "Select a thread:",
+            choices=choices,
+            default=default_choice,
+            use_arrow_keys=True,
+            use_indicator=True,
+            use_shortcuts=False,
+            use_search_filter=len(threads) > 10,  # Enable search for 10+ threads
+            style=custom_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select, type to search)"
+            if len(threads) > 10
+            else "(↑↓ navigate, Enter select)",
+        ).ask_async()
     except (KeyboardInterrupt, EOFError):
         console.print()
-        return None
+        return None, None
 
-    if not choice:
-        return threads[default_index]["id"]
-
-    if not choice.isdigit():
-        console.print(f"[red]Invalid selection: {choice}[/red]")
+    if not selected_id:
         console.print()
-        return None
+        return None, None
 
-    selected_idx = int(choice) - 1
-    if selected_idx < 0 or selected_idx >= len(threads):
-        console.print(f"[red]Selection out of range: {choice}[/red]")
+    # Step 2: Select action
+    thread = next((t for t in threads if t["id"] == selected_id), None)
+    if not thread:
+        return None, None
+
+    thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+    short_id = selected_id[:8]
+
+    console.print()
+    console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
+    console.print()
+
+    # Action menu style - same background highlighting
+    action_style = Style(
+        [
+            ("qmark", f"{COLORS['primary']} bold"),
+            ("question", "bold"),
+            ("answer", f"{COLORS['primary']} bold"),
+            ("pointer", f"{COLORS['primary']} bold"),
+            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),  # Consistent highlighting
+            ("selected", f"{COLORS['primary']}"),
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+            ("search_success", f"{COLORS['primary']}"),  # Successful search results
+            ("search_none", "#888888"),  # No search results message
+            ("separator", "#888888"),  # Separators in lists
+        ]
+    )
+
+    action_choices = [
+        Choice(title="↻  Switch to this thread", value="switch"),
+        Choice(title="✕  Delete this thread", value="delete"),
+        Choice(title="✎  Rename this thread", value="rename"),
+        Choice(title="←  Cancel", value="cancel"),
+    ]
+
+    try:
+        action = await questionary.select(
+            "Choose an action:",
+            choices=action_choices,
+            use_arrow_keys=True,
+            use_indicator=True,
+            use_shortcuts=False,
+            style=action_style,
+            qmark="▶",
+            pointer="●",
+            instruction="(↑↓ navigate, Enter select)",
+        ).ask_async()
+    except (KeyboardInterrupt, EOFError):
         console.print()
-        return None
+        return None, None
 
-    return threads[selected_idx]["id"]
+    if not action or action == "cancel":
+        console.print()
+        return None, None
+
+    return selected_id, action
+
+
+async def _confirm_thread_deletion(thread: dict) -> bool:
+    """Show confirmation dialog for thread deletion.
+
+    Args:
+        thread: Thread metadata dict
+
+    Returns:
+        True if user confirmed deletion, False otherwise
+    """
+    import questionary
+    from questionary import Style
+
+    # Warning style for deletion confirmation
+    warning_style = Style(
+        [
+            ("qmark", "#f59e0b bold"),  # Amber/orange for warning
+            ("question", "bold"),
+            ("answer", "#ef4444 bold"),  # Red for destructive action
+            ("instruction", "#888888 italic"),
+            ("text", ""),
+        ]
+    )
+
+    thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+    short_id = thread["id"][:8]
+    trace_count = thread.get("trace_count", 0)
+    tokens = thread.get("langsmith_tokens", 0)
+
+    # Format token count with K/M abbreviations
+    if tokens >= 1_000_000:
+        token_display = f"{tokens / 1_000_000:.1f}M"
+    elif tokens >= 1_000:
+        token_display = f"{tokens / 1_000:.1f}K"
+    else:
+        token_display = f"{tokens:,}"
+
+    console.print()
+    console.print("[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
+    console.print()
+    console.print(f"[bold]Thread:[/bold] {thread_name} [dim]({short_id})[/dim]")
+    console.print()
+    console.print("[dim]This will permanently delete:[/dim]")
+    console.print(f"[dim]  • All conversation history ({trace_count} traces)[/dim]")
+    console.print(f"[dim]  • {token_display} tokens of context[/dim]")
+    console.print("[dim]  • Cannot be undone[/dim]")
+    console.print()
+
+    try:
+        confirmation = await questionary.text(
+            "Type 'DELETE' to confirm:",
+            validate=lambda text: text == "DELETE" or "Must type DELETE exactly (case-sensitive)",
+            style=warning_style,
+            qmark="⚠",
+            instruction="(Type DELETE in all caps to confirm)",
+        ).ask_async()
+    except (KeyboardInterrupt, EOFError):
+        console.print()
+        console.print("[dim]✓ Deletion cancelled.[/dim]")
+        console.print()
+        return False
+
+    if confirmation != "DELETE":
+        console.print()
+        console.print("[dim]✓ Deletion cancelled.[/dim]")
+        console.print()
+        return False
+
+    return True
+
+
+async def _select_thread_interactively(
+    threads, current_thread_id: str | None
+) -> tuple[str, str] | tuple[None, None]:
+    """Present an interactive picker to choose a thread and action.
+
+    Returns tuple of (thread_id, action) where action is 'switch', 'delete', or 'rename'.
+    Returns (None, None) if selection was cancelled.
+    """
+    if not threads:
+        return None, None
+
+    return await _select_thread_with_questionary(threads, current_thread_id)
+
+
+# Removed _select_thread_fallback - no longer needed after questionary migration
 
 
 async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool:
@@ -374,7 +537,7 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
         console.print()
         try:
-            target_id = _select_thread_interactively(enriched_threads, current_id)
+            target_id, action = await _select_thread_interactively(enriched_threads, current_id)
         except KeyboardInterrupt:
             console.print("\n[red]Thread selection interrupted.[/red]")
             console.print()
@@ -382,24 +545,99 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
         console.print()
 
-        if not target_id:
-            console.print("[dim]Thread selection cancelled.[/dim]")
+        if not target_id or not action:
+            console.print("[dim]Selection cancelled.[/dim]")
             console.print()
             return True
 
-        # Switch to selected thread
-        try:
-            thread_manager.switch_thread(target_id)
-            thread = thread_manager.get_thread_metadata(target_id)
+        # Get thread metadata for all actions
+        thread = next((t for t in enriched_threads if t["id"] == target_id), None)
+        if not thread:
+            console.print("[red]Thread not found.[/red]")
             console.print()
-            console.print(
-                f"[{COLORS['primary']}]✓ Switched to thread: {thread.get('name') or '(unnamed)'} ({target_id[:8]})[/{COLORS['primary']}]"
+            return True
+
+        thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+        short_id = target_id[:8]
+
+        # Handle action
+        if action == "switch":
+            try:
+                thread_manager.switch_thread(target_id)
+                console.print()
+                console.print(
+                    f"[{COLORS['primary']}]✓ Switched to thread: {thread_name} ({short_id})[/{COLORS['primary']}]"
+                )
+                console.print()
+            except ValueError as e:
+                console.print()
+                console.print(f"[red]Error: {e}[/red]")
+                console.print()
+
+        elif action == "delete":
+            # Confirm deletion
+            if not await _confirm_thread_deletion(thread):
+                return True
+
+            # Perform deletion
+            try:
+                thread_manager.delete_thread(target_id, agent)
+                console.print()
+                console.print(f"[green]✓ Deleted thread: {thread_name} ({short_id})[/green]")
+                console.print()
+            except ValueError as e:
+                console.print()
+                console.print(f"[red]Error: {e}[/red]")
+                console.print()
+
+        elif action == "rename":
+            import questionary
+            from questionary import Style
+
+            # Custom style for rename
+            rename_style = Style(
+                [
+                    ("qmark", f"{COLORS['primary']} bold"),
+                    ("question", "bold"),
+                    ("answer", f"{COLORS['primary']} bold"),
+                    ("instruction", "#888888 italic"),
+                    ("text", ""),
+                ]
             )
+
             console.print()
-        except ValueError as e:
-            console.print()
-            console.print(f"[red]Error: {e}[/red]")
-            console.print()
+            try:
+                new_name = await questionary.text(
+                    "Enter new thread name:",
+                    default=thread_name if thread_name != "(unnamed)" else "",
+                    style=rename_style,
+                    qmark="✎",
+                    instruction="(Enter to confirm, Ctrl+C to cancel)",
+                    validate=lambda text: len(text.strip()) > 0 or "Thread name cannot be empty",
+                ).ask_async()
+            except (KeyboardInterrupt, EOFError):
+                console.print()
+                console.print("[dim]✓ Rename cancelled.[/dim]")
+                console.print()
+                return True
+
+            if not new_name or new_name.strip() == thread_name:
+                console.print()
+                console.print("[dim]✓ Rename cancelled.[/dim]")
+                console.print()
+                return True
+
+            try:
+                thread_manager.rename_thread(target_id, new_name.strip())
+                console.print()
+                console.print(
+                    f"[{COLORS['primary']}]✓ Renamed thread to: {new_name.strip()} [dim]({short_id})[/dim][/{COLORS['primary']}]"
+                )
+                console.print()
+            except ValueError as e:
+                console.print()
+                console.print(f"[red]✕ Error: {e}[/red]")
+                console.print()
 
         return True
 
@@ -446,10 +684,9 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
 
     # Use execute_task to properly handle state-based interrupts via streaming
     # This follows LangChain v1 best practices for interrupt handling
-    from .execution import execute_task
 
     user_input = "Please call the request_handoff tool to initiate thread handoff."
-    
+
     await execute_task(
         user_input=user_input,
         agent=agent,
@@ -510,6 +747,22 @@ async def handle_command(
             )
             console.print()
 
+        return True
+
+    if base_cmd == "menu" or base_cmd == "m":
+        # Open main menu
+        if not session_state:
+            console.print()
+            console.print("[red]Session state not available[/red]")
+            console.print()
+            return True
+
+        from .menu_system import MenuSystem
+
+        menu_system = MenuSystem(session_state, agent, token_tracker)
+        result = await menu_system.show_main_menu()
+        if result == "exit":
+            return "exit"
         return True
 
     if base_cmd == "help":

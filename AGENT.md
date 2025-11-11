@@ -22,6 +22,12 @@ You are working with a senior engineer who:
 
 ---
 
+## ✅ Compliance Requirement
+
+Reading, understanding, and following everything in this document is **mandatory before every session**. If you have not acknowledged these instructions since starting your current task, pause now and re-read them. Do not run commands, edit files, or open PRs unless you can explicitly confirm you are in compliance with `AGENT.md`.
+
+---
+
 ## 🔬 Your Research Workflow (MANDATORY) NON-NEGOTIABLE
 
 **CORE PRINCIPLE:** Understand what you need to build, then research those specific needs.

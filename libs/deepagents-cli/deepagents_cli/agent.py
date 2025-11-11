@@ -163,7 +163,7 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         assistant_id: Unique agent identifier (used for file organization).
         tools: List of tools available to the agent.
         checkpointer: Optional pre-initialized checkpointer.
-                     - If None: Creates default SqliteSaver (local CLI, tests)
+                     - If None: Creates default SqliteSaver fallback (see WARNING below)
                      - If AsyncSqliteSaver: Use for async CLI (via main.py context manager)
                      - If InMemorySaver: Use for unit tests
                      - If ServerCheckpointer: Server runtime injects this
@@ -171,6 +171,26 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
 
     Returns:
         Compiled agent graph with configured middleware and persistence.
+
+    WARNING - Sync Checkpointer Fallback (Issue #40):
+        The fallback when checkpointer=None creates a SYNCHRONOUS SqliteSaver.
+        This is INCOMPATIBLE with the async execution path (agent.astream() in execution.py).
+
+        According to LangGraph documentation:
+        - SqliteSaver does NOT support async methods (aget_tuple, alist, aput)
+        - Calling async methods on SqliteSaver raises NotImplementedError
+        - AsyncSqliteSaver is REQUIRED for async graph execution methods
+
+        Current Usage Patterns (Fallback Never Triggered):
+        1. CLI (main.py): ALWAYS passes AsyncSqliteSaver via context manager
+        2. Server (graph.py): Passes NO checkpointer (server injects its own)
+        3. Tests: Use mock checkpointers (DummyCheckpointer in test_thread_manager.py)
+
+        This fallback exists for defensive programming but would FAIL if ever triggered
+        because all execution paths use async methods. Consider either:
+        A) Removing the fallback entirely (fail fast if checkpointer missing)
+        B) Creating AsyncSqliteSaver fallback (requires async context)
+        C) Documenting this is dead code for historical/safety reasons
     """
     shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
@@ -189,6 +209,15 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
     if checkpointer is None:
         import sqlite3
 
+        # IMPORTANT: This creates a SYNCHRONOUS SqliteSaver as a fallback.
+        # This is INCOMPATIBLE with async execution (agent.astream() in execution.py).
+        # In practice, this fallback is NEVER triggered because:
+        # - CLI always passes AsyncSqliteSaver (main.py line 271)
+        # - Server never passes checkpointer (graph.py line 117)
+        # - Tests use mock checkpointers
+        #
+        # This code exists for defensive programming but would fail if used.
+        # See docstring WARNING above for full explanation and potential fixes.
         checkpoint_db = agent_dir / "checkpoints.db"
         # Direct construction - proper way for long-running applications
         conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
@@ -230,15 +259,16 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
     agent_middleware = [
         AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
         shell_middleware,
-
         # Handoff middleware stack (order matters for after_model execution!)
-        HandoffToolMiddleware(),              # Provides request_handoff tool (no after_model hook)
-
+        HandoffToolMiddleware(),  # Provides request_handoff tool (no after_model hook)
         # Listed in REVERSE of execution order for after_model():
-        HandoffApprovalMiddleware(model=model),  # after_model() executes SECOND (reads proposal, interrupts, refines)
-        HandoffSummarizationMiddleware(model=model),  # after_model() executes FIRST (generates proposal)
-
-        HandoffCleanupMiddleware(),           # after_agent() hook for cleanup
+        HandoffApprovalMiddleware(
+            model=model
+        ),  # after_model() executes SECOND (reads proposal, interrupts, refines)
+        HandoffSummarizationMiddleware(
+            model=model
+        ),  # after_model() executes FIRST (generates proposal)
+        HandoffCleanupMiddleware(),  # after_agent() hook for cleanup
     ]
 
     # Get the system prompt

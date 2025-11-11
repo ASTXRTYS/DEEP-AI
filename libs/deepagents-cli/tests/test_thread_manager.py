@@ -1,9 +1,13 @@
 import sqlite3
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+import requests
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from deepagents_cli.server_client import LangGraphRequestError
 from deepagents_cli.thread_manager import ThreadManager
 
 
@@ -114,3 +118,68 @@ def test_reconcile_preserves_recent_metadata(mock_fork, mock_create, tmp_path):
 
     preview = manager.reconcile_with_checkpointer(apply=False)
     assert all(thread["id"] != recent_id for thread in preview.metadata_only)
+
+
+@patch("deepagents_cli.server_client.delete_thread_on_server")
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_delete_thread_falls_back_when_server_unreachable(
+    mock_fork, mock_create, mock_delete, tmp_path
+):
+    mock_create.side_effect = ["default-thread", "to-delete"]
+    mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
+
+    def offline_delete(*_, **__):
+        raise LangGraphRequestError("offline") from requests.exceptions.ConnectionError(
+            "server down"
+        )
+
+    mock_delete.side_effect = offline_delete
+
+    agent_dir = tmp_path / "agent"
+    manager = ThreadManager(agent_dir, "tester")
+    default_id = manager.get_current_thread_id()
+    to_delete = manager.create_thread(name="temp")
+    manager.switch_thread(default_id)
+
+    recorder = SimpleNamespace(deleted=[])
+
+    class DummyCheckpointer:
+        def delete_thread(self, thread_id):
+            recorder.deleted.append(thread_id)
+
+    agent = SimpleNamespace(checkpointer=DummyCheckpointer())
+
+    manager.delete_thread(to_delete, agent)
+
+    assert to_delete in recorder.deleted
+    remaining_ids = [thread["id"] for thread in manager.list_threads()]
+    assert to_delete not in remaining_ids
+    assert mock_delete.called
+
+
+@patch("deepagents_cli.server_client.delete_thread_on_server")
+@patch("deepagents_cli.server_client.create_thread_on_server")
+@patch("deepagents_cli.server_client.fork_thread_on_server")
+def test_delete_thread_raises_on_server_error(mock_fork, mock_create, mock_delete, tmp_path):
+    mock_create.side_effect = ["default-thread", "to-delete"]
+    mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
+
+    def http_error(*_, **__):
+        raise LangGraphRequestError("boom") from requests.exceptions.HTTPError("403")
+
+    mock_delete.side_effect = http_error
+
+    agent_dir = tmp_path / "agent"
+    manager = ThreadManager(agent_dir, "tester")
+    default_id = manager.get_current_thread_id()
+    to_delete = manager.create_thread(name="temp")
+    manager.switch_thread(default_id)
+
+    agent = SimpleNamespace(checkpointer=SimpleNamespace(delete_thread=lambda *_: None))
+
+    with pytest.raises(ValueError):
+        manager.delete_thread(to_delete, agent)
+
+    assert manager.get_thread_metadata(to_delete) is not None
+    assert mock_delete.called

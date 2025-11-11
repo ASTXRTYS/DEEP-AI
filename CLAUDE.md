@@ -2,143 +2,47 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
----
+> **Protocol Reminder:** Before following any instructions here, confirm you have read and acknowledged [`AGENT.md`](AGENT.md); those operating rules are mandatory for every agent session.
 
 ## Repository Overview
 
-**What**: Deep Agents - A general-purpose "deep agent" framework built on LangGraph with planning, file system access, and subagent spawning capabilities. Inspired by Claude Code.
+This is a **UV workspace monorepo** containing the DeepAgents framework - a LangGraph-based system for building "deep" agents with planning, file system access, and subagent spawning capabilities.
 
-**Location**: `/Users/Jason/astxrtys/DevTools/deepagents`
+**Two main packages:**
+1. **`libs/deepagents/`** - Core library implementing the deep agent pattern with middleware
+2. **`libs/deepagents-cli/`** - Interactive CLI tool for running deep agents with persistent memory
 
-**Structure**: UV workspace monorepo with two packages:
-- `libs/deepagents/` - Core library implementing deep agent primitives
-- `libs/deepagents-cli/` - CLI application for interactive coding assistance
+Both packages share common middleware and are designed to work together, with the CLI being a reference implementation and user-facing tool built on the core library.
 
-**Origin**: Fork of LangChain's `deepagents` repository with custom enhancements (thread management, TTL cleanup, LangSmith metrics)
+## Development Commands
 
----
-
-## 🔬 MCP Research Workflow (CRITICAL)
-
-**See `/Users/Jason/.claude/CLAUDE.md` for complete workflow details.**
-
-When working on **ANY code in this repository**, follow this MANDATORY research workflow:
-
-### Step 1: DeepWiki Index - Interconnected Knowledge
-**Tool:** `mcp__deepwiki__ask_question` with repo `ASTXRTYS/index`
-**URL:** https://deepwiki.com/ASTXRTYS/index
-
-**What you're accessing:**
-- Full LangGraph open-source repo (indexed)
-- Full LangChain open-source repo (indexed)
-- Full DeepAgents repo (indexed)
-- **Interconnected knowledge across ALL THREE**
-
-When you ask the Index a question, you get answers that understand how LangGraph + LangChain + DeepAgents work TOGETHER, not isolated documentation from one repo.
-
-**Use this FIRST for:**
-- Middleware architecture and execution patterns
-- Graph execution (interrupts, state, HITL)
-- Understanding how DeepAgents extends LangChain/LangGraph
-- ANY architectural question before implementing
-
-### Step 2: LangChain Docs MCP - Official Documentation
-**Tool:** `mcp__docs-langchain__SearchDocsByLangChain`
-
-**Use this for:**
-- Verifying API signatures (after architectural understanding)
-- Finding specific method parameters
-- Official code examples
-- Latest updates
-
-### Step 3: Document Your Learnings
-**Location:** `/Users/Jason/.claude/memories/`
-
-Save research findings, architectural insights, and patterns discovered. Build on your persistent memory across sessions.
-
-**The Workflow:**
-1. **DeepWiki FIRST** - Get architectural understanding (interconnected knowledge)
-2. **LangChain Docs** - Verify APIs and specifics
-3. **Implement** - With confidence based on research
-4. **Document** - Save learnings to memory
-
-**Never guess** based on general knowledge - LangChain/LangGraph move too fast. Use the tools.
-
----
-
-## Git Workflow
-
-### Remotes
-```bash
-origin   → https://github.com/langchain-ai/deepagents.git  # LangChain upstream (read-only)
-upstream → git@github.com:ASTXRTYS/DEEP-AI.git             # Your fork (read-write)
-```
-
-### Common Operations
-
-**Pull latest from LangChain**:
-```bash
-git fetch origin
-git merge origin/master  # Review UPSTREAM_SYNC_ANALYSIS.md first
-```
-
-**Push your changes**:
-```bash
-git push upstream <branch-name>
-```
-
-**Check for conflicts before merging**:
-```bash
-git fetch origin
-git merge --no-commit --no-ff origin/master
-git merge --abort  # If you just wanted to test
-```
-
-**Important**: Always check `UPSTREAM_SYNC_ANALYSIS.md` before merging upstream changes to understand what's coming in.
-
----
-
-## Development Setup
-
-### 1. Install Dependencies
+### Setup
 
 ```bash
-# Install with all dependency groups
+# Install dependencies (run from repository root)
 uv sync --all-groups
 
-# Or use pip (from root)
-python3.11 -m pip install -e . --break-system-packages
-```
+# Activate virtual environment
+source .venv/bin/activate
 
-### 2. Install CLI Package
-
-```bash
+# Install CLI in development mode
 cd libs/deepagents-cli
 python3.11 -m pip install -e . --break-system-packages
 ```
 
-### 3. Environment Configuration
-
-Create `libs/deepagents-cli/.env` with:
-```bash
-ANTHROPIC_API_KEY=sk-ant-api03-...
-TAVILY_API_KEY=tvly-dev-...
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=lsv2_pt_...
-LANGCHAIN_PROJECT=deepagents-cli
-DEEPAGENTS_DATABASE_URL=postgresql://localhost/deepagents
-```
-
-### 4. PostgreSQL Setup (for CLI long-term memory)
+### Testing
 
 ```bash
-brew services start postgresql@14
-/opt/homebrew/opt/postgresql@14/bin/createdb deepagents
+# Run unit tests for core library
+make test
+
+# Run integration tests
+make integration_test
+
+# Run CLI tests
+cd libs/deepagents-cli
+uv run pytest tests/
 ```
-
----
-
-## Build & Test Commands
 
 ### Linting & Formatting
 
@@ -146,700 +50,317 @@ brew services start postgresql@14
 # Format all Python files
 make format
 
-# Lint with ruff and mypy (full)
+# Lint without fixing
 make lint
 
-# Lint only the deepagents package
+# Format and lint with fixes
+make format
+
+# Lint only the core package
 make lint_package
 
-# Lint tests only
+# Lint only tests
 make lint_tests
 
-# Lint only changed files vs master
-make lint_diff
+# Lint changes since master
+make lint_diff format_diff
 ```
 
-### Testing
-
-```bash
-# Run unit tests with coverage
-make test
-
-# Run integration tests
-make integration_test
-
-# Run specific test file
-uv run pytest libs/deepagents/tests/unit_tests/test_specific.py
-
-# Run with verbose output
-uv run pytest libs/deepagents/tests/unit_tests -v
-
-# Run CLI tests
-cd libs/deepagents-cli
-uv run pytest tests/
-```
-
-### Linting Configuration
-
-**Ruff**: Strict linting with ALL rules enabled, specific ignores for practicality
-- Line length: 150 chars (core lib), 100 chars (CLI)
-- Docstring format: Google style
-- See `pyproject.toml` for specific ignores (COM812, ISC001, etc.)
-
-**Mypy**: Strict type checking for core library, relaxed for CLI
-- Core lib: `strict = true`
-- CLI: `strict = false` with many disabled checks (pragmatic for CLI code)
-
----
+**Note:** The project uses `ruff` for both linting and formatting, with `mypy` for type checking.
 
 ## Architecture
 
-### Core Concepts
+### Core Library (`libs/deepagents/`)
 
-**Deep Agents** = Planning + File System + Subagents + Detailed Prompt
+**Entry point:** `create_deep_agent()` in `graph.py`
 
-1. **Planning**: TodoListMiddleware provides `write_todos` tool for task tracking
-2. **File System**: FilesystemMiddleware provides `ls`, `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search`
-3. **Subagents**: SubAgentMiddleware enables spawning specialized agents via `task` tool
-4. **Prompts**: Comprehensive system prompts inspired by Claude Code
+Creates a LangGraph agent with three built-in capabilities via middleware:
+1. **Planning** - TodoListMiddleware provides `write_todos` tool
+2. **File System** - FilesystemMiddleware provides file operations (ls, read_file, write_file, edit_file, glob_search, grep_search)
+3. **Subagents** - SubAgentMiddleware provides `task` tool for spawning specialized agents
 
-### Middleware Stack
-
-Middleware is applied in this order (from `libs/deepagents/graph.py:create_deep_agent()`):
-
+**Middleware Stack (order matters):**
 ```python
 [
-    TodoListMiddleware(),                        # Planning tool
-    FilesystemMiddleware(backend=backend),       # File operations
-    SubAgentMiddleware(...),                     # Subagent spawning
-    SummarizationMiddleware(...),               # Context compression
-    AnthropicPromptCachingMiddleware(...),      # Prompt caching
-    PatchToolCallsMiddleware(),                 # Tool call formatting
-    *custom_middleware,                          # Your middleware
-    HumanInTheLoopMiddleware(interrupt_on=...),  # HITL (if configured)
+    TodoListMiddleware(),                    # Planning tool
+    handle_filesystem_permissions,           # File operation guards
+    FilesystemMiddleware(backend=...),       # File system tools
+    SubAgentMiddleware(...),                 # Subagent spawning
+    SummarizationMiddleware(...),            # Conversation summarization
+    SafeAnthropicPromptCachingMiddleware(), # Prompt caching
+    PatchToolCallsMiddleware(),             # Tool call formatting fixes
+    *middleware,                            # Custom middleware (user-provided)
+    HumanInTheLoopMiddleware(...),          # HITL approvals (if interrupt_on configured)
 ]
 ```
 
-**Key Point**: Middleware order matters! Each middleware wraps the next, so early middleware sees all events.
+**Key insight:** Middleware is composable. You can use individual middleware (TodoListMiddleware, FilesystemMiddleware, SubAgentMiddleware) independently with `create_agent()` if you don't need the full deep agent pattern.
 
-### Backend Architecture
+### CLI (`libs/deepagents-cli/`)
 
-Backends handle file storage for agents. Three types:
+**Entry point:** `cli_main()` in `main.py`
 
-1. **FilesystemBackend**: Stores files on disk (default, used by CLI)
-   - Simple, works great for single-user/local deployment
-   - CLI uses composite routing: CWD for default, `~/.deepagents/{agent}/` for `/memories/`
+Built on top of `create_deep_agent()` with additional features:
+- **Persistent memory** - SqliteSaver for checkpointing, FilesystemBackend/PostgresStore for long-term storage
+- **Thread management** - Multiple conversation threads with switching/forking
+- **LangGraph server integration** - Runs alongside `langgraph dev` for Studio UI debugging
+- **Custom middleware** - Adds AgentMemoryMiddleware and ResumableShellToolMiddleware
+- **HITL approvals** - Requires approval for shell, write_file, edit_file, web_search, task tools
 
-2. **StateBackend**: Stores files in LangGraph state (memory)
-   - Useful for agents that don't need persistence
-   - Files disappear when conversation ends
+**Architecture decision:** Both CLI and LangGraph server use the **exact same agent creation logic** from `agent.py:create_agent_with_config()`. This ensures consistency - the server runs the identical agent as the CLI.
 
-3. **StoreBackend**: Stores files in LangGraph Store (database)
-   - For multi-instance/cloud deployments
-   - Requires PostgreSQL
-   - Currently not used by CLI but infrastructure is ready
+**Memory Architecture (3 layers):**
+1. **Checkpointing** (thread-level) - SQLite at `~/.deepagents/{agent}/checkpoints.db`
+2. **File backend** (cross-thread) - FilesystemBackend at `~/.deepagents/{agent}/` (accessed via `/memories/` virtual path)
+3. **Store** (programmatic) - PostgresStore (infrastructure ready but currently file operations go through FilesystemBackend)
 
-**CompositeBackend**: Routes paths to different backends
+### Backend System
+
+The backend system abstracts storage for file operations:
+
+**CompositeBackend pattern:**
 ```python
-CompositeBackend(
-    default=FilesystemBackend(),           # Regular file ops in CWD
+backend = CompositeBackend(
+    default=FilesystemBackend(),  # Operations in CWD
     routes={
-        "/memories/": FilesystemBackend(   # Agent's persistent storage
-            root_dir="~/.deepagents/agent/"
-        )
+        "/memories/": FilesystemBackend(root_dir=agent_dir)  # Persistent agent storage
     }
 )
 ```
 
-### Persistence Architecture (CLI)
+**Available backends:**
+- `FilesystemBackend` - Local disk storage (current implementation)
+- `StateBackend` - Store in LangGraph state (checkpointed)
+- `StoreBackend` - Store in BaseStore (requires PostgresStore)
 
-The CLI uses three storage layers:
+**For customer deployments:** Switch from FilesystemBackend to StoreBackend for multi-instance/cloud compatibility.
 
-1. **Checkpointing** (conversation state):
-   - Storage: SQLite at `~/.deepagents/{agent_name}/checkpoints.db`
-   - Purpose: Resume conversations across sessions
-   - Scope: Per-thread (each thread has unique ID)
-   - Implementation: `SqliteSaver` from `langgraph.checkpoint.sqlite`
+### Middleware Pattern
 
-2. **File Backend** (agent memory files):
-   - Storage: `~/.deepagents/{agent_name}/` directory
-   - Purpose: Persistent files accessible via `/memories/` prefix
-   - Scope: Per-agent (shared across all threads of that agent)
-   - Implementation: `FilesystemBackend` with routing
+Middleware provides hooks at different execution points:
 
-3. **Store** (long-term knowledge):
-   - Storage: PostgreSQL database (shared across all agents)
-   - Purpose: Cross-agent, cross-thread persistent storage
-   - Status: Infrastructure ready, not actively used yet
-   - Implementation: `PostgresStore` from `langgraph.store.postgres`
-
-**Important**: Use direct construction for long-running apps (CLI/server):
+**Hook order:**
 ```python
-# ✅ Correct for CLI
+before_agent()      # Before agent starts
+before_model()      # Before each model call
+after_model()       # After each model call (reverse order!)
+before_tool()       # Before each tool call
+after_tool()        # After each tool call
+```
+
+**Critical:** `after_model()` hooks execute in **reverse order** - last middleware attached runs first.
+
+**When to use middleware vs custom nodes:**
+- ✅ Middleware: Cross-cutting concerns (logging, caching, auth), intercepting all tool/model calls
+- ✅ Custom nodes: Complex stateful workflows, multi-step business logic (requires full StateGraph, not available in `create_deep_agent`)
+
+## Common Development Tasks
+
+### Adding Custom Tools
+
+```python
+from langchain_core.tools import tool
+from deepagents import create_deep_agent
+
+@tool
+def my_tool(param: str) -> str:
+    """Tool description shown to LLM."""
+    return "result"
+
+agent = create_deep_agent(
+    tools=[my_tool],
+    system_prompt="Use my_tool to..."
+)
+```
+
+### Adding Custom Middleware
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+
+class MyMiddleware(AgentMiddleware):
+    tools = [my_tool]  # Optional: add tools
+
+    def after_model(self, messages, agent_input, config, **kwargs):
+        # Intercept after model call
+        # Modify messages, emit interrupt(), etc.
+        yield from messages
+
+agent = create_deep_agent(
+    middleware=[MyMiddleware()]
+)
+```
+
+### Running the CLI Locally
+
+**Two-terminal workflow:**
+
+Terminal 1:
+```bash
+cd libs/deepagents-cli
+langgraph dev  # Starts server on http://127.0.0.1:2024
+```
+
+Terminal 2:
+```bash
+deepagents  # Connects to server
+```
+
+**Alternative (tmux):**
+```bash
+cd libs/deepagents-cli
+./start-tmux.sh  # Creates split panes with server + CLI
+```
+
+### Debugging with LangGraph Studio
+
+1. Start server: `cd libs/deepagents-cli && langgraph dev`
+2. Open: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+3. Execute tasks and see step-by-step graph execution
+4. Inspect state, time-travel debug
+
+**Note:** Studio UI is free for local dev server (no API credits needed).
+
+## Important Implementation Details
+
+### Graph Export for LangGraph Server
+
+**Critical constraint:** `graph.py` exports must use **absolute imports**, not relative imports.
+
+```python
+# ✅ CORRECT (in libs/deepagents-cli/deepagents_cli/graph.py)
+from deepagents_cli.agent import create_agent_with_config
+from deepagents_cli.tools import http_request
+
+# ❌ WRONG - breaks LangGraph server
+from .agent import create_agent_with_config
+from .tools import http_request
+```
+
+**Reason:** LangGraph's module loader executes graph.py outside of package context.
+
+### Checkpoint and Store Initialization
+
+**For long-running applications (CLI/server)**, use direct construction with connection objects:
+
+```python
 import sqlite3
+import psycopg
+
+# Checkpointer (conversation state)
 conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
 checkpointer = SqliteSaver(conn)
 checkpointer.setup()
 
-# ❌ Wrong - context manager is for scripts only
-with SqliteSaver.from_conn_string(db_uri) as checkpointer:
-    ...  # CLI would exit when context closes
+# Store (long-term memory)
+pg_conn = psycopg.connect(database_url, autocommit=True)
+store = PostgresStore(pg_conn)
+store.setup()
 ```
 
----
+**Never use** `from_conn_string()` context managers for long-running apps - those are for short scripts only.
 
-## Package Structure
+### Subagent Configuration
 
-### libs/deepagents/ (Core Library)
+Subagents come in two forms:
 
-```
-deepagents/
-├── __init__.py           # Exports create_deep_agent
-├── graph.py              # Main factory: create_deep_agent()
-├── backends/
-│   ├── protocol.py       # BackendProtocol interface
-│   ├── filesystem.py     # FilesystemBackend
-│   ├── state.py          # StateBackend
-│   ├── store.py          # StoreBackend
-│   ├── composite.py      # CompositeBackend (routing)
-│   └── utils.py          # Helper functions
-└── middleware/
-    ├── filesystem.py     # FilesystemMiddleware (file tools)
-    ├── subagents.py      # SubAgentMiddleware (task tool)
-    ├── resumable_shell.py # ResumableShellToolMiddleware
-    └── patch_tool_calls.py # PatchToolCallsMiddleware
-```
-
-### libs/deepagents-cli/ (CLI Application)
-
-```
-deepagents_cli/
-├── __init__.py           # Exports cli_main
-├── __main__.py           # Entry point for `python -m`
-├── agent.py              # ⭐ Agent creation (shared by CLI & server)
-├── graph.py              # ⭐ LangGraph server export
-├── tools.py              # http_request, web_search tools
-├── main.py               # CLI main loop
-├── execution.py          # Task execution logic
-├── ui.py                 # Rich UI rendering
-├── input.py              # Prompt handling (prompt_toolkit)
-├── commands.py           # Slash command handlers
-├── config.py             # Configuration & styling
-├── thread_manager.py     # Thread lifecycle management
-├── thread_store.py       # Thread metadata persistence
-├── agent_memory.py       # AgentMemoryMiddleware
-├── resumable_shell_async.py # Async shell middleware
-├── file_ops.py           # File operation utilities
-├── token_utils.py        # Token counting
-├── server_client.py      # LangGraph server client
-├── langgraph.json        # Server configuration
-├── .env                  # Environment variables (gitignored)
-└── default_agent_prompt.md # Default system prompt
-```
-
----
-
-## Critical Implementation Details
-
-### 1. Agent Creation Must Be Shared (CLI & Server)
-
-**Rule**: Both CLI and LangGraph server MUST use the same agent creation logic.
-
-**Why**: Ensures the server runs the EXACT same agent as the CLI, preventing configuration drift.
-
-**Implementation**:
-- `agent.py:create_agent_with_config()` - Single source of truth
-- `graph.py` imports and wraps this function for server export
-- Both paths get identical model, tools, middleware, HITL configuration
-
-**Example**:
-```python
-# ✅ Correct: Both use create_agent_with_config
-# CLI (main.py)
-from .agent import create_agent_with_config
-agent = create_agent_with_config(assistant_id, ...)
-
-# Server (graph.py)
-from deepagents_cli.agent import create_agent_with_config
-graph = create_agent_with_config("agent", ...)
-```
-
-### 2. Import Rules for graph.py
-
-**Rule**: `graph.py` MUST use ABSOLUTE imports, NOT relative imports.
-
-**Why**: LangGraph's module loader executes `graph.py` outside of package context.
-
-```python
-# ✅ Correct
-from deepagents_cli.agent import create_agent_with_config
-from deepagents_cli.tools import http_request, web_search
-
-# ❌ Wrong - will break LangGraph server
-from .agent import create_agent_with_config
-from .tools import http_request, web_search
-```
-
-**Error if you get it wrong**: `ImportError: attempted relative import with no known parent package`
-
-### 3. Model Configuration
-
-**Core Library Default** (`libs/deepagents/graph.py`):
-```python
-ChatAnthropic(
-    model_name="claude-sonnet-4-5-20250929",
-    max_tokens=20000,
-)
-```
-
-**CLI Configuration** (`libs/deepagents-cli/deepagents_cli/config.py`):
-```python
-ChatAnthropic(
-    model="claude-sonnet-4-5-20250929",
-    max_tokens=8000,
-    temperature=0,
-    timeout=60,
-    max_retries=2,
-)
-```
-
-**Note**: CLI uses lower max_tokens for cost control. Adjust based on your needs.
-
-### 4. Thread Management (CLI Feature)
-
-**Thread ID Format**: Pure UUID (e.g., `a3f0c4d2-1b5e-4a7c-9d8e-2f3b1c4a5d6e`)
-
-**Storage**:
-- Thread metadata: `~/.deepagents/{agent_name}/threads.json`
-- Checkpoints: `~/.deepagents/{agent_name}/checkpoints.db`
-
-**Commands**:
-- `/new [name]` - Create new thread
-- `/threads` - Interactive picker (shows name, date, message count, tokens)
-- `/threads continue <id>` - Switch to thread
-- `/threads fork [name]` - Fork current thread
-- `/threads info [id]` - Show thread details
-- `/threads rename <id> <name>` - Rename thread
-
-**Implementation**: `thread_manager.py:ThreadManager` class
-
-### 5. Subagent Configuration
-
-**SubAgent Schema**:
+**1. SubAgent (dict-based config):**
 ```python
 {
-    "name": str,              # How main agent calls it
-    "description": str,        # When to use it
-    "prompt": str,            # Subagent system prompt
-    "tools": List[...],       # Subagent-specific tools
-    "model": Optional[...],   # Override default model
-    "middleware": Optional[...], # Additional middleware
-    "interrupt_on": Optional[...] # HITL config
+    "name": "researcher",
+    "description": "Researches topics in depth",
+    "prompt": "You are an expert researcher...",
+    "tools": [web_search],
+    "model": "gpt-4o",  # Optional override
+    "middleware": [],   # Optional
 }
 ```
 
-**CompiledSubAgent Schema** (for custom LangGraph graphs):
+**2. CompiledSubAgent (pre-built graph):**
 ```python
 {
-    "name": str,
-    "description": str,
-    "runnable": Runnable  # Pre-built LangGraph graph
+    "name": "analyzer",
+    "description": "Analyzes data",
+    "runnable": my_custom_graph  # Pre-compiled LangGraph
 }
 ```
 
----
+Use CompiledSubAgent when you need full control over the subagent's graph structure.
 
 ## Testing Strategy
 
-### Unit Tests (`libs/deepagents/tests/unit_tests/`)
+**Unit tests** - Test individual components in isolation:
+- Middleware behavior
+- Backend implementations
+- Tool functionality
 
-- Test individual middleware components
-- Test backend implementations
-- Mock LangGraph/LangChain dependencies
-- Fast execution (<1s per test)
+**Integration tests** - Test end-to-end agent behavior:
+- Full agent execution with real LLM calls
+- Checkpointing and memory persistence
+- Subagent spawning
 
-### Integration Tests (`libs/deepagents/tests/integration_tests/`)
-
-- Test full agent workflows
-- Test CLI commands end-to-end
-- Require API keys (ANTHROPIC_API_KEY)
-- Slower execution (seconds to minutes)
-
-### Test Isolation
-
-**Important**: Tests should NOT interfere with each other or user's agent data.
-
-```python
-# ✅ Good: Use temporary directories
-@pytest.fixture
-def tmp_agent_dir(tmp_path):
-    return tmp_path / ".deepagents" / "test-agent"
-
-# ❌ Bad: Use real agent directory
-def test_agent():
-    agent_dir = Path.home() / ".deepagents" / "agent"  # Could destroy user data!
+**Test organization:**
+```
+libs/deepagents/tests/
+├── unit_tests/        # Fast, mocked, isolated
+└── integration_tests/ # Slow, real API calls, end-to-end
 ```
 
-### Running Specific Tests
+## Environment Variables
+
+The CLI requires these environment variables (stored in `libs/deepagents-cli/.env`):
 
 ```bash
-# Run single test function
-uv run pytest libs/deepagents/tests/unit_tests/test_file.py::test_function
-
-# Run with markers
-uv run pytest -m "not integration"  # Skip integration tests
-
-# Run with coverage report
-uv run pytest --cov=deepagents --cov-report=html
-
-# Debug with print statements
-uv run pytest -s  # Disable output capture
-```
-
----
-
-## LangGraph Server Integration
-
-### Configuration (langgraph.json)
-
-```json
-{
-  "dependencies": ["."],
-  "graphs": {
-    "agent": "./deepagents_cli/graph.py:graph"
-  },
-  "env": ".env"
-}
-```
-
-**Key Points**:
-- **Graph ID**: `agent` - must match CLI's default `assistant_id`
-- **Export Path**: `./path/file.py:variable_name` - points to module-level variable
-- **Environment**: Loads from `.env` file in CLI directory
-- **Auto-reload**: Watches for file changes (but only server reloads, not CLI)
-
-### Server vs CLI Behavior
-
-| Aspect | Server | CLI |
-|--------|--------|-----|
-| Entry point | `graph.py:graph` | `main.py:cli_main()` |
-| Agent creation | `create_agent_with_config()` | `create_agent_with_config()` |
-| Thread ID | From request | From ThreadManager |
-| Environment | `.env` via langgraph.json | `.env` via dotenv |
-| Reload | Auto on file change | Manual restart required |
-| Storage | Same SQLite DB | Same SQLite DB |
-| Studio UI | Free for local dev | N/A |
-
-**Important**: By default, server and CLI share the same agent storage at `~/.deepagents/agent/`, so conversations are synced.
-
----
-
-## Common Pitfalls & Solutions
-
-### 1. Relative Imports in graph.py
-
-**Error**: `ImportError: attempted relative import with no known parent package`
-
-**Fix**: Use absolute imports in `graph.py`:
-```python
-# Change this:
-from .agent import create_agent_with_config
-
-# To this:
-from deepagents_cli.agent import create_agent_with_config
-```
-
-### 2. Missing Dependencies After Upstream Merge
-
-**Error**: `ModuleNotFoundError: No module named 'langchain_anthropic'`
-
-**Fix**: Reinstall package:
-```bash
-cd libs/deepagents-cli
-python3.11 -m pip install -e . --break-system-packages
-```
-
-### 3. PostgreSQL Connection Errors
-
-**Error**: `could not connect to server` or `database "deepagents" does not exist`
-
-**Fix**:
-```bash
-# Start PostgreSQL
-brew services start postgresql@14
-
-# Create database
-/opt/homebrew/opt/postgresql@14/bin/createdb deepagents
-
-# Verify connection
-psql -d deepagents -c "SELECT 1"
-```
-
-### 4. Context Manager vs Direct Construction
-
-**Error**: `'_GeneratorContextManager' object has no attribute 'get_next_version'`
-
-**Cause**: Using `from_conn_string()` which returns a context manager, not a direct instance.
-
-**Fix**: Use direct construction for long-running apps:
-```python
-# ❌ Wrong for CLI
-checkpointer = SqliteSaver.from_conn_string(db_uri)
-
-# ✅ Correct for CLI
-import sqlite3
-conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
-checkpointer = SqliteSaver(conn)
-checkpointer.setup()
-```
-
-### 5. Agent Storage Location Confusion
-
-**Problem**: Changes not persisting or appearing in wrong place.
-
-**Understanding**:
-- CLI storage: `~/.deepagents/{agent_name}/`
-- Server storage: Same as CLI (shares by default)
-- `/memories/` maps to agent directory, NOT current working directory
-- Regular file operations use current working directory
-
-**Check your paths**:
-```bash
-# Agent storage
-ls ~/.deepagents/agent/
-
-# Checkpoints
-sqlite3 ~/.deepagents/agent/checkpoints.db ".tables"
-
-# Thread metadata
-cat ~/.deepagents/agent/threads.json
-```
-
----
-
-## Contributing to Upstream
-
-### Before Creating PR
-
-1. **Sync with upstream**:
-   ```bash
-   git fetch origin
-   git merge origin/master
-   ```
-
-2. **Run full test suite**:
-   ```bash
-   make test
-   make integration_test
-   ```
-
-3. **Lint and format**:
-   ```bash
-   make format
-   make lint
-   ```
-
-4. **Test CLI manually**:
-   ```bash
-   cd libs/deepagents-cli
-   deepagents
-   # Test your changes interactively
-   ```
-
-5. **Test LangGraph server**:
-   ```bash
-   cd libs/deepagents-cli
-   langgraph dev
-   # Open Studio UI and test
-   ```
-
-### PR Guidelines
-
-- PRs go to `langchain-ai/deepagents` (origin), not your fork
-- Focus on core library changes for upstream
-- CLI-specific features should stay in your fork unless generally useful
-- Include tests for new features
-- Update relevant documentation
-- Keep commits atomic and well-described
-
-### Maintaining Your Fork
-
-**Workflow**:
-1. Develop features in your fork branches
-2. Merge upstream changes regularly
-3. Push to your fork (`upstream` remote)
-4. For upstream contributions, create PR to `origin/master`
-
----
-
-## Debugging & Tracing
-
-### LangSmith Integration
-
-**Setup**:
-```bash
-# In .env
-LANGCHAIN_TRACING_V2=true
+# Required
+ANTHROPIC_API_KEY=sk-ant-api03-...
 LANGCHAIN_API_KEY=lsv2_pt_...
-LANGCHAIN_PROJECT=deepagents-cli
+
+# Optional
+TAVILY_API_KEY=tvly-dev-...              # For web search
+DEEPAGENTS_DATABASE_URL=postgresql://... # For PostgresStore
+LANGCHAIN_TRACING_V2=true                # Enable LangSmith tracing
+LANGCHAIN_PROJECT=deepagents-cli         # LangSmith project name
 ```
 
-**Usage**:
-- All agent runs automatically traced
-- View at https://smith.langchain.com
-- Free for local development
-- Includes full message history, tool calls, timing
+## Git Workflow
 
-### LangGraph Studio
+This is a fork of `langchain-ai/deepagents` with custom enhancements.
 
-**Launch**:
+**Remote setup:**
+```
+origin   → https://github.com/langchain-ai/deepagents.git  # LangChain upstream
+upstream → git@github.com:ASTXRTYS/DEEP-AI.git             # Your fork
+```
+
+**Sync with LangChain upstream:**
 ```bash
-cd libs/deepagents-cli
-langgraph dev
-# Open: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+git fetch origin
+git merge origin/master
+git push upstream master
 ```
 
-**Features**:
-- Visual graph execution flow
-- Step-by-step debugging
-- State inspection at each node
-- Time-travel debugging
-- Free for local dev server
-- No API credits consumed
+## Key Principles
 
-### CLI Debugging
+1. **Middleware is composable** - Use individual middleware pieces independently
+2. **Both CLI and server share agent creation logic** - Consistency via `create_agent_with_config()`
+3. **Backend abstraction enables flexibility** - FilesystemBackend for local, StoreBackend for production
+4. **UV workspace manages dependencies** - Use `uv sync` not `pip install` for workspace packages
+5. **Graph exports must use absolute imports** - LangGraph server limitation
 
-**Token tracking**:
-```bash
-# In session
-/tokens  # Show usage statistics
+## Package Relationship
+
+```
+deepagents (core)
+    ├── Exports: create_deep_agent()
+    ├── Middleware: TodoList, Filesystem, Subagents
+    └── Backends: Filesystem, State, Store
+                    ↑
+                    │ depends on
+                    │
+deepagents-cli
+    ├── Imports: deepagents==0.2.4 (workspace dependency)
+    ├── Adds: Thread management, HITL UI, persistent memory
+    └── Exports: graph.py (for langgraph dev)
 ```
 
-**Thread debugging**:
-```bash
-# In session
-/threads info  # Current thread details
-/threads info <thread-id>  # Specific thread details
-```
-
-**Database inspection**:
-```bash
-# Check checkpoints
-sqlite3 ~/.deepagents/agent/checkpoints.db
-SELECT thread_id, checkpoint_ns, created_at FROM checkpoints ORDER BY created_at DESC LIMIT 10;
-
-# Check threads
-cat ~/.deepagents/agent/threads.json | jq
-```
-
----
-
-## Performance Considerations
-
-### Prompt Caching
-
-**What**: Anthropic's prompt caching reduces costs for repeated context.
-
-**Implementation**: `AnthropicPromptCachingMiddleware` automatically enables it.
-
-**Best Practices**:
-- Keep system prompts stable (cache hits)
-- Use persistent memory (fewer repeated instructions)
-- Avoid dynamically generated prompts when possible
-
-### Token Management
-
-**Summarization**: `SummarizationMiddleware` automatically summarizes old messages when context > 170k tokens.
-
-**Configuration**:
-```python
-SummarizationMiddleware(
-    model=model,
-    max_tokens_before_summary=170000,  # Trigger threshold
-    messages_to_keep=6,                # Keep recent messages verbatim
-)
-```
-
-**CLI Token Tracking**: `ui.py:TokenTracker` monitors usage per interaction.
-
-### Subagent Usage
-
-**When to use subagents**:
-- ✅ Complex subtasks requiring focus
-- ✅ Context isolation (prevent main agent pollution)
-- ✅ Specialized tools/prompts
-- ✅ Parallel work on independent tasks
-
-**When NOT to use**:
-- ❌ Simple single-step operations
-- ❌ Tasks requiring main agent context
-- ❌ Cost-sensitive operations (spawns new agent)
-
----
-
-## Quick Reference
-
-### Common File Locations
-
-| What | Path |
-|------|------|
-| Core library | `libs/deepagents/` |
-| CLI package | `libs/deepagents-cli/` |
-| CLI config | `libs/deepagents-cli/.env` |
-| Agent storage | `~/.deepagents/{agent_name}/` |
-| Checkpoints | `~/.deepagents/{agent_name}/checkpoints.db` |
-| Threads | `~/.deepagents/{agent_name}/threads.json` |
-| Agent prompt | `~/.deepagents/{agent_name}/agent.md` |
-| Tests | `libs/deepagents/tests/` |
-| Examples | `examples/` |
-
-### Essential Commands
-
-```bash
-# Development
-make format              # Format code
-make lint               # Lint all
-make test               # Unit tests
-make integration_test   # Integration tests
-
-# CLI Usage
-deepagents              # Start CLI
-deepagents list         # List agents
-deepagents reset --agent myagent  # Reset agent
-
-# Server
-cd libs/deepagents-cli
-langgraph dev          # Start server
-
-# Git
-git fetch origin       # Get upstream changes
-git merge origin/master  # Merge upstream
-git push upstream <branch>  # Push to fork
-```
-
-### Key Files to Understand
-
-1. **libs/deepagents/graph.py** - Core factory, middleware stack
-2. **libs/deepagents-cli/deepagents_cli/agent.py** - CLI agent creation
-3. **libs/deepagents-cli/deepagents_cli/graph.py** - Server export
-4. **libs/deepagents/middleware/filesystem.py** - File system tools
-5. **libs/deepagents/middleware/subagents.py** - Subagent logic
-6. **libs/deepagents-cli/deepagents_cli/execution.py** - CLI execution loop
-7. **libs/deepagents-cli/deepagents_cli/thread_manager.py** - Thread management
-
----
-
-## Additional Resources
-
-- **Official Docs**: https://docs.langchain.com/oss/python/deepagents/overview
-- **API Reference**: https://reference.langchain.com/python/deepagents/
-- **LangGraph Docs**: https://langchain-ai.github.io/langgraph/
-- **LangSmith**: https://smith.langchain.com
-- **Repository**: https://github.com/langchain-ai/deepagents
-- **Your Fork**: https://github.com/ASTXRTYS/DEEP-AI
-
----
-
-**Last Updated**: 2025-11-05
-**Maintainer**: Jason (ASTXRTYS)
-**Based on**: LangChain deepagents v0.2.5
+The CLI is both a **user-facing tool** and a **reference implementation** showing how to build production agents with the core library.

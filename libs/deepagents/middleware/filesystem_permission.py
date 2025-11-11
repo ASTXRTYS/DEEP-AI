@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Awaitable
+from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware import wrap_tool_call
 from langchain.tools.tool_node import ToolCallRequest
@@ -34,8 +33,5 @@ async def handle_filesystem_permissions(
         if logger.isEnabledFor(logging.DEBUG):
             # F-string avoids double %-formatting errors in logging.
             logger.debug(f"Permission error in {tool_name}: {exc}")
-        message = (
-            f"[Permission denied] {tool_name} could not access the requested resource. "
-            "The path is protected or requires elevated permissions."
-        )
+        message = f"[Permission denied] {tool_name} could not access the requested resource. The path is protected or requires elevated permissions."
         return ToolMessage(content=message, tool_call_id=tool_call_id, name=tool_name)

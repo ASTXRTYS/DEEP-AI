@@ -40,6 +40,7 @@ DEEP_AGENTS_ASCII = """
 # Only essential, high-signal commands are listed here for clean UX.
 # Advanced commands still work but are hidden from autocomplete.
 COMMANDS = {
+    "menu": "Open main menu (also: Ctrl+M)",
     "help": "Show help and available commands",
     "new [name]": "Create a new thread",
     "threads": "Switch threads (interactive)",
@@ -67,7 +68,11 @@ except ValueError:
 
 # Async checkpointer (required since execute_task is async)
 # Set to "0" only for debugging/compatibility testing
-USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in {"1", "true", "True"}
+USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in {
+    "1",
+    "true",
+    "True",
+}
 
 
 class SessionState:
@@ -78,6 +83,7 @@ class SessionState:
         self.thread_manager = thread_manager
         self.model = None
         self.pending_handoff_child_id: str | None = None  # Deferred handoff target
+        self.menu_requested: bool = False  # Flag for Ctrl+M menu trigger
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

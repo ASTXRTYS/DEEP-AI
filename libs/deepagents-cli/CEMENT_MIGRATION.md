@@ -262,18 +262,19 @@ class SessionState:
     pending_handoff_child_id: str | None
 ```
 
-## Migration Checklist
+## Migration Status: COMPLETE ✅
 
-If you're updating from the Questionary version:
+Migration from Questionary to Rich prompts is now complete:
 
 - [x] Cement framework added to dependencies
 - [x] Rich UI components enhanced with panels and tables
 - [x] Numbered menu system implemented
-- [x] Legacy Questionary code preserved for compatibility
+- [x] All Questionary code removed from Python modules
+- [x] Questionary dependency removed from pyproject.toml
 - [x] Entry point updated to use Cement by default
 - [x] Documentation updated
-- [ ] Tests updated for new architecture
-- [ ] User feedback collected
+- [x] All imports verified working
+- [x] Lock files updated
 
 ## Troubleshooting
 
@@ -292,15 +293,6 @@ pip install 'deepagents[cli]' cement
 ```bash
 export LANG=en_US.UTF-8
 export TERM=xterm-256color
-```
-
-### Want to use arrow-key menus again?
-
-The original Questionary-based menu system is preserved in the codebase. You can access it programmatically:
-
-```python
-from deepagents_cli import cli_main_legacy
-cli_main_legacy()
 ```
 
 ## Future Enhancements

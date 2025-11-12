@@ -9,7 +9,8 @@ from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .config import COLORS, console
+from .config import console
+from .rich_ui import RichPrompt
 
 
 @dataclass
@@ -70,45 +71,28 @@ async def prompt_handoff_decision(
             summary_json=proposal.summary_json,
         )
 
-    import questionary
-    from questionary import Choice, Style
-
-    # Handoff approval style
-    handoff_style = Style(
-        [
-            ("qmark", f"{COLORS['primary']} bold"),
-            ("question", "bold"),
-            ("answer", f"{COLORS['primary']} bold"),
-            ("pointer", f"{COLORS['primary']} bold"),
-            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),
-            ("selected", f"{COLORS['primary']}"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", f"{COLORS['primary']}"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
+    # Use Rich prompts for selection
+    rich_prompt = RichPrompt(console)
 
     console.print()
     try:
-        decision = await questionary.select(
-            "Review the handoff summary and choose an action:",
+        decision = await rich_prompt.select_async(
+            question="Review the handoff summary and choose an action:",
             choices=[
-                Choice(title="✓  Approve (proceed with handoff)", value="approve"),
-                Choice(title="⟲  Refine (regenerate with feedback)", value="refine"),
-                Choice(title="✕  Decline (cancel handoff)", value="decline"),
+                ("approve", "✓  Approve (proceed with handoff)"),
+                ("refine", "⟲  Refine (regenerate with feedback)"),
+                ("decline", "✕  Decline (cancel handoff)"),
             ],
             default="approve",
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=True,  # Allow a/r/d shortcuts
-            style=handoff_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select, or press a/r/d)",
-        ).ask_async()
+        )
     except (KeyboardInterrupt, EOFError):
+        console.print()
+        console.print("[dim]✓ Handoff cancelled.[/dim]")
+        console.print()
+        return HandoffDecision(type="reject")
+
+    # Handle cancellation (None return)
+    if decision is None:
         console.print()
         console.print("[dim]✓ Handoff cancelled.[/dim]")
         console.print()
@@ -132,19 +116,20 @@ async def prompt_handoff_decision(
         console.print(
             "[dim]Examples: 'Add more technical details', 'Make it shorter', 'Focus on implementation changes'[/dim]"
         )
-        console.print()
 
         try:
-            feedback = await questionary.text(
-                "Enter your feedback:",
+            feedback = await rich_prompt.text_input_async(
+                prompt_text="Enter your feedback:",
                 multiline=True,
-                style=handoff_style,
-                qmark="✎",
-                instruction="(Type feedback, press Alt+Enter or Esc then Enter to finish)",
-                validate=lambda text: len(text.strip()) > 0
-                or "Feedback cannot be empty for refinement",
-            ).ask_async()
+                validate=lambda text: True
+                if len(text.strip()) > 0
+                else "Feedback cannot be empty for refinement",
+            )
         except (KeyboardInterrupt, EOFError):
+            feedback = None
+
+        # Handle cancellation
+        if feedback is None:
             console.print()
             console.print("[dim]✓ Refinement cancelled.[/dim]")
             console.print()

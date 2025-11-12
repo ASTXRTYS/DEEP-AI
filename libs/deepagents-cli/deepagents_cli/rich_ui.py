@@ -4,7 +4,15 @@ This module provides beautiful terminal UI components using the Rich library,
 including panels, tables, progress bars, and interactive prompts.
 """
 
+import asyncio
+from collections.abc import Callable
+from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.validation import ValidationError, Validator
 from rich.console import Console, Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -138,6 +146,292 @@ class RichPrompt:
             )
         except KeyboardInterrupt:
             return None
+
+    async def select_async(
+        self,
+        question: str,
+        choices: list[tuple[str, str]],
+        default: str | None = None,
+        context_panel: Panel | None = None,
+    ) -> str | None:
+        """Display a selection menu asynchronously (for HITL approval workflows).
+
+        Args:
+            question: Question to ask the user
+            choices: List of (value, title) tuples where value is the return value
+            default: Default value (if any)
+            context_panel: Optional Rich Panel to display before the menu
+
+        Returns:
+            Selected value or None if cancelled
+        """
+        # Display context panel if provided (already rendered by caller)
+        if context_panel:
+            self.console.print(context_panel)
+            self.console.print()
+
+        # Display question
+        self.console.print(f"[bold yellow]{question}[/bold yellow]")
+        self.console.print()
+
+        # Display numbered choices
+        for i, (value, title) in enumerate(choices, 1):
+            choice_style = "bold white" if value == default else "white"
+            default_marker = " [dim](default)[/dim]" if value == default else ""
+            self.console.print(f"  {i}. [{choice_style}]{title}[/{choice_style}]{default_marker}")
+
+        self.console.print()
+        self.console.print(
+            "[dim]Type the number and press Enter • Ctrl+C to cancel[/dim]",
+            style=COLORS["dim"],
+        )
+        self.console.print()
+
+        # Use prompt_toolkit for async input with keyboard shortcuts
+        shortcuts = {str(i): choices[i - 1][0] for i in range(1, len(choices) + 1)}
+        completer = WordCompleter(list(shortcuts.keys()), ignore_case=True)
+
+        class NumberValidator(Validator):
+            def validate(self, document):
+                text = document.text.strip()
+                if text and text not in shortcuts:
+                    raise ValidationError(
+                        message=f"Please enter a number between 1 and {len(choices)}",
+                        cursor_position=len(text),
+                    )
+
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _(event):
+            """Enter submits the input."""
+            event.current_buffer.validate_and_handle()
+
+        session = PromptSession(
+            message=HTML('<style fg="#10b981">▶</style> '),
+            completer=completer,
+            validator=NumberValidator(),
+            key_bindings=kb,
+        )
+
+        try:
+            # Run in executor to make it async-compatible
+            loop = asyncio.get_event_loop()
+            choice_str = await loop.run_in_executor(None, lambda: session.prompt())
+
+            # Map to value
+            return shortcuts.get(choice_str.strip())
+
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    async def text_input_async(
+        self,
+        prompt_text: str,
+        default: str = "",
+        multiline: bool = False,
+        validate: Callable[[str], bool | str] | None = None,
+    ) -> str | None:
+        """Get text input from user asynchronously.
+
+        Args:
+            prompt_text: Input prompt
+            default: Default value
+            multiline: Whether to enable multiline mode
+            validate: Optional validation function (returns True or error message string)
+
+        Returns:
+            User input or None if cancelled
+        """
+        # Display prompt
+        self.console.print()
+        self.console.print(f"[bold yellow]{prompt_text}[/bold yellow]")
+        self.console.print()
+
+        if multiline:
+            self.console.print(
+                "[dim]Type your feedback, press Alt+Enter or Esc then Enter to finish[/dim]"
+            )
+            self.console.print()
+
+            # For multiline, use prompt_toolkit to get proper multiline input
+            kb = KeyBindings()
+
+            @kb.add("escape", "enter")
+            def _(event):
+                """Alt+Enter or Esc then Enter submits the input."""
+                event.current_buffer.validate_and_handle()
+
+            class ContentValidator(Validator):
+                def validate(self, document):
+                    if validate:
+                        result = validate(document.text)
+                        if result is not True:
+                            raise ValidationError(
+                                message=str(result), cursor_position=len(document.text)
+                            )
+
+            session = PromptSession(
+                message=HTML('<style fg="#10b981">✎</style> '),
+                multiline=True,
+                key_bindings=kb,
+                validator=ContentValidator() if validate else None,
+            )
+
+            try:
+                # Run in executor to make it async-compatible
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, lambda: session.prompt(default=default))
+                return result
+
+            except (KeyboardInterrupt, EOFError):
+                return None
+
+        else:
+            # Single-line input using prompt_toolkit for consistency
+            class ContentValidator(Validator):
+                def validate(self, document):
+                    if validate:
+                        result = validate(document.text)
+                        if result is not True:
+                            raise ValidationError(
+                                message=str(result), cursor_position=len(document.text)
+                            )
+
+            session = PromptSession(
+                message=HTML('<style fg="#10b981">▶</style> '),
+                validator=ContentValidator() if validate else None,
+            )
+
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, lambda: session.prompt(default=default))
+                return result
+
+            except (KeyboardInterrupt, EOFError):
+                return None
+
+    async def confirm_async(
+        self,
+        message: str,
+        default: bool = False,
+        warning_panel: Panel | None = None,
+    ) -> bool:
+        """Async confirmation prompt.
+
+        Args:
+            message: Confirmation question
+            default: Default response
+            warning_panel: Optional warning panel for dangerous actions
+
+        Returns:
+            True if confirmed, False otherwise
+        """
+        # Display warning panel if provided
+        if warning_panel:
+            self.console.print()
+            self.console.print(warning_panel)
+            self.console.print()
+
+        # Display the question
+        default_str = " (Y/n)" if default else " (y/N)"
+        self.console.print(f"[bold yellow]{message}{default_str}[/bold yellow]")
+        self.console.print()
+
+        session = PromptSession(message=HTML('<style fg="#10b981">▶</style> '))
+
+        try:
+            # Run in executor to make it async-compatible
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: session.prompt())
+
+            # Parse response
+            response = response.strip().lower()
+            if not response:
+                return default
+            return response in ("y", "yes")
+
+        except (KeyboardInterrupt, EOFError):
+            self.console.print()
+            self.console.print("[dim]✓ Cancelled.[/dim]")
+            self.console.print()
+            return False
+
+    async def dangerous_confirmation_async(
+        self,
+        action: str,
+        target: str,
+        details: dict[str, Any],
+        confirmation_text: str = "DELETE",
+    ) -> bool:
+        """Dangerous action confirmation requiring typed confirmation.
+
+        Displays red warning panel with action details,
+        requires user to type exact confirmation text.
+
+        Args:
+            action: Action name (e.g., "Delete Thread")
+            target: Target name/ID
+            details: Dict of details to display (e.g., message_count, tokens)
+            confirmation_text: Text user must type exactly
+
+        Returns:
+            True if user typed confirmation text exactly, False otherwise
+        """
+        # Build warning panel
+        safe_target = escape(target)
+        detail_lines = [f"[bold]Target:[/bold] {safe_target}\n"]
+
+        for key, value in details.items():
+            detail_lines.append(f"[bold]{key}:[/bold] {value}")
+
+        detail_lines.append(
+            f"\n[yellow]⚠  This action cannot be undone![/yellow]\n"
+            f"[yellow]Type '{confirmation_text}' to confirm.[/yellow]"
+        )
+
+        panel = Panel(
+            "\n".join(detail_lines),
+            title=f"[bold red]⚠  {action}[/bold red]",
+            border_style="red",
+            padding=(1, 2),
+        )
+
+        self.console.print()
+        self.console.print(panel)
+        self.console.print()
+
+        # Create validator for exact match
+        def validate_confirmation(text: str) -> bool | str:
+            """Validate that user typed exact confirmation text."""
+            if text != confirmation_text:
+                return f"Must type {confirmation_text} exactly (case-sensitive)"
+            return True
+
+        try:
+            # Use text_input_async with validation
+            result = await self.text_input_async(
+                prompt_text=f'Type "{confirmation_text}" to confirm:',
+                default="",
+                multiline=False,
+                validate=validate_confirmation,
+            )
+
+            if result == confirmation_text:
+                self.console.print()
+                self.console.print(f"[red]Confirmed: {action}[/red]")
+                self.console.print()
+                return True
+            self.console.print()
+            self.console.print("[dim]✓ Cancelled.[/dim]")
+            self.console.print()
+            return False
+
+        except (KeyboardInterrupt, EOFError):
+            self.console.print()
+            self.console.print("[dim]✓ Cancelled.[/dim]")
+            self.console.print()
+            return False
 
     def _create_menu_content(
         self, title: str, options: list[tuple[str, str]], subtitle: str | None

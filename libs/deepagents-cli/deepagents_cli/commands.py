@@ -16,6 +16,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
 from .execution import execute_task
+from .rich_ui import RichPrompt
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
 
@@ -287,10 +288,10 @@ def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
 
 
-async def _select_thread_with_questionary(
+async def _select_thread_with_rich(
     threads, current_thread_id: str | None
 ) -> tuple[str, str] | tuple[None, None]:
-    """Interactive thread picker using questionary with arrow key navigation.
+    """Interactive thread picker using Rich prompts.
 
     Args:
         threads: List of thread metadata dicts
@@ -299,68 +300,28 @@ async def _select_thread_with_questionary(
     Returns:
         Tuple of (thread_id, action) or (None, None) if cancelled
     """
-    import questionary
-    from questionary import Choice, Style
-
-    # Custom style matching CLI color scheme
-    # Key insight from questionary docs: highlighted needs BACKGROUND color to be visually obvious
-    custom_style = Style(
-        [
-            ("qmark", f"{COLORS['primary']} bold"),
-            ("question", "bold"),
-            ("answer", f"{COLORS['primary']} bold"),
-            ("pointer", f"{COLORS['primary']} bold"),
-            (
-                "highlighted",
-                f"#ffffff bg:{COLORS['primary']} bold",
-            ),  # White text on green background
-            ("selected", f"{COLORS['primary']}"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", f"{COLORS['primary']}"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
-
-    console.print()
+    rich_prompt = RichPrompt(console)
 
     # Build choices with formatted display
     choices = []
-    default_choice = None
-
     for thread in threads:
         summary = _format_thread_summary(thread, current_thread_id)
-        choice = Choice(title=summary, value=thread["id"])
-        choices.append(choice)
+        choices.append((thread["id"], summary))
 
-        # Mark current thread as default
-        if thread["id"] == current_thread_id:
-            default_choice = choice
+    # Step 1: Select thread
+    instruction = (
+        "(Type number and press Enter • Ctrl+C to cancel)"
+        if len(threads) <= 10
+        else "(Type number to select • Ctrl+C to cancel)"
+    )
 
-    # Step 1: Select thread with search filtering for large lists
-    try:
-        selected_id = await questionary.select(
-            "Select a thread:",
-            choices=choices,
-            default=default_choice,
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=False,
-            use_search_filter=len(threads) > 10,  # Enable search for 10+ threads
-            style=custom_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select, type to search)"
-            if len(threads) > 10
-            else "(↑↓ navigate, Enter select)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        return None, None
+    selected_id = await rich_prompt.select_async(
+        question="Select a thread:",
+        choices=choices,
+        default=current_thread_id,
+    )
 
     if not selected_id:
-        console.print()
         return None, None
 
     # Step 2: Select action
@@ -375,45 +336,17 @@ async def _select_thread_with_questionary(
     console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
     console.print()
 
-    # Action menu style - same background highlighting
-    action_style = Style(
-        [
-            ("qmark", f"{COLORS['primary']} bold"),
-            ("question", "bold"),
-            ("answer", f"{COLORS['primary']} bold"),
-            ("pointer", f"{COLORS['primary']} bold"),
-            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),  # Consistent highlighting
-            ("selected", f"{COLORS['primary']}"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", f"{COLORS['primary']}"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
-
     action_choices = [
-        Choice(title="↻  Switch to this thread", value="switch"),
-        Choice(title="✕  Delete this thread", value="delete"),
-        Choice(title="✎  Rename this thread", value="rename"),
-        Choice(title="←  Cancel", value="cancel"),
+        ("switch", "↻  Switch to this thread"),
+        ("delete", "✕  Delete this thread"),
+        ("rename", "✎  Rename this thread"),
+        ("cancel", "←  Cancel"),
     ]
 
-    try:
-        action = await questionary.select(
-            "Choose an action:",
-            choices=action_choices,
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=False,
-            style=action_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        return None, None
+    action = await rich_prompt.select_async(
+        question="Choose an action:",
+        choices=action_choices,
+    )
 
     if not action or action == "cancel":
         console.print()
@@ -431,19 +364,7 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
     Returns:
         True if user confirmed deletion, False otherwise
     """
-    import questionary
-    from questionary import Style
-
-    # Warning style for deletion confirmation
-    warning_style = Style(
-        [
-            ("qmark", "#f59e0b bold"),  # Amber/orange for warning
-            ("question", "bold"),
-            ("answer", "#ef4444 bold"),  # Red for destructive action
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-        ]
-    )
+    rich_prompt = RichPrompt(console)
 
     thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
@@ -458,38 +379,18 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
     else:
         token_display = f"{tokens:,}"
 
-    console.print()
-    console.print("[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
-    console.print()
-    console.print(f"[bold]Thread:[/bold] {thread_name} [dim]({short_id})[/dim]")
-    console.print()
-    console.print("[dim]This will permanently delete:[/dim]")
-    console.print(f"[dim]  • All conversation history ({trace_count} traces)[/dim]")
-    console.print(f"[dim]  • {token_display} tokens of context[/dim]")
-    console.print("[dim]  • Cannot be undone[/dim]")
-    console.print()
+    # Build details dict for confirmation
+    details = {
+        "Conversation History": f"{trace_count} traces",
+        "Token Count": f"{token_display} tokens of context",
+    }
 
-    try:
-        confirmation = await questionary.text(
-            "Type 'DELETE' to confirm:",
-            validate=lambda text: text == "DELETE" or "Must type DELETE exactly (case-sensitive)",
-            style=warning_style,
-            qmark="⚠",
-            instruction="(Type DELETE in all caps to confirm)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        console.print("[dim]✓ Deletion cancelled.[/dim]")
-        console.print()
-        return False
-
-    if confirmation != "DELETE":
-        console.print()
-        console.print("[dim]✓ Deletion cancelled.[/dim]")
-        console.print()
-        return False
-
-    return True
+    return await rich_prompt.dangerous_confirmation_async(
+        action="Delete Thread",
+        target=f"{thread_name} ({short_id})",
+        details=details,
+        confirmation_text="DELETE",
+    )
 
 
 async def _select_thread_interactively(
@@ -503,7 +404,7 @@ async def _select_thread_interactively(
     if not threads:
         return None, None
 
-    return await _select_thread_with_questionary(threads, current_thread_id)
+    return await _select_thread_with_rich(threads, current_thread_id)
 
 
 # Removed _select_thread_fallback - no longer needed after questionary migration
@@ -594,35 +495,19 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
                 console.print()
 
         elif action == "rename":
-            import questionary
-            from questionary import Style
+            rich_prompt = RichPrompt(console)
 
-            # Custom style for rename
-            rename_style = Style(
-                [
-                    ("qmark", f"{COLORS['primary']} bold"),
-                    ("question", "bold"),
-                    ("answer", f"{COLORS['primary']} bold"),
-                    ("instruction", "#888888 italic"),
-                    ("text", ""),
-                ]
-            )
-
-            console.print()
-            try:
-                new_name = await questionary.text(
-                    "Enter new thread name:",
-                    default=thread_name if thread_name != "(unnamed)" else "",
-                    style=rename_style,
-                    qmark="✎",
-                    instruction="(Enter to confirm, Ctrl+C to cancel)",
-                    validate=lambda text: len(text.strip()) > 0 or "Thread name cannot be empty",
-                ).ask_async()
-            except (KeyboardInterrupt, EOFError):
-                console.print()
-                console.print("[dim]✓ Rename cancelled.[/dim]")
-                console.print()
+            # Validator function
+            def validate_name(text: str) -> bool | str:
+                if len(text.strip()) == 0:
+                    return "Thread name cannot be empty"
                 return True
+
+            new_name = await rich_prompt.text_input_async(
+                prompt_text="Enter new thread name:",
+                default=thread_name if thread_name != "(unnamed)" else "",
+                validate=validate_name,
+            )
 
             if not new_name or new_name.strip() == thread_name:
                 console.print()

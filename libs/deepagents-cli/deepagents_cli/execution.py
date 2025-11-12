@@ -15,6 +15,7 @@ from rich.panel import Panel
 from .config import COLORS, console
 from .file_ops import FileOpTracker, build_approval_preview
 from .input import parse_file_mentions
+from .rich_ui import RichPrompt
 from .thread_store import ThreadStoreError
 from .ui import (
     TokenTracker,
@@ -71,14 +72,11 @@ def _extract_tool_args(action_request: dict) -> dict | None:
 
 
 async def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
-    """Prompt user to approve/reject a tool action with questionary.
+    """Prompt user to approve/reject a tool action with Rich prompts.
 
-    NOTE: This function is now async to support questionary's async API.
+    NOTE: This function is async to support async prompt workflows.
     Callers must await this function.
     """
-    import questionary
-    from questionary import Choice, Style
-
     description = action_request.get("description", "No description available")
     tool_name = action_request.get("name") or action_request.get("tool")
     tool_args = _extract_tool_args(action_request)
@@ -107,41 +105,24 @@ async def prompt_for_tool_approval(action_request: dict, assistant_id: str | Non
         console.print()
         render_diff_block(preview.diff, preview.diff_title or preview.title)
 
-    # Questionary style for HITL approval
-    approval_style = Style(
-        [
-            ("qmark", "#10b981 bold"),
-            ("question", "bold"),
-            ("answer", "#10b981 bold"),
-            ("pointer", "#10b981 bold"),
-            ("highlighted", "#ffffff bg:#10b981 bold"),  # White on green
-            ("selected", "#10b981"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", "#10b981"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
+    # Use Rich prompts for approval
+    rich_prompt = RichPrompt(console)
 
     console.print()
     try:
-        decision = await questionary.select(
-            "Choose an action:",
+        decision = await rich_prompt.select_async(
+            question="Choose an action:",
             choices=[
-                Choice(title="✓  Approve (allow this tool to run)", value="approve"),
-                Choice(title="✕  Reject (block this tool)", value="reject"),
+                ("approve", "✓  Approve (allow this tool to run)"),
+                ("reject", "✕  Reject (block this tool)"),
             ],
             default="approve",
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=True,  # Allow 'a' and 'r' shortcuts
-            style=approval_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select, or press a/r)",
-        ).ask_async()
+        )
     except (KeyboardInterrupt, EOFError):
+        decision = None
+
+    # Handle cancellation (None return)
+    if decision is None:
         console.print()
         console.print("[dim]✓ Approval cancelled - tool rejected.[/dim]")
         console.print()

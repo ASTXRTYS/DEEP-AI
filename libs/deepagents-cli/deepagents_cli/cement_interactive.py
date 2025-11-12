@@ -51,8 +51,8 @@ async def simple_cli_loop(
     token_tracker = TokenTracker()
     token_tracker.set_baseline(baseline_tokens)
 
-    # Create menu system
-    menu_system = CementMenuSystem(session_state, agent, token_tracker)
+    # Create menu system (agent not stored, passed to methods that need it)
+    menu_system = CementMenuSystem(session_state, token_tracker)
 
     while True:
         try:
@@ -68,7 +68,9 @@ async def simple_cli_loop(
         # Check if menu was requested via Ctrl+M
         if session_state.menu_requested:
             session_state.menu_requested = False  # Reset flag
-            result = menu_system.show_main_menu()
+            # Run blocking menu call in executor to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, menu_system.show_main_menu)
             if result == "exit":
                 console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
                 break
@@ -89,7 +91,9 @@ async def simple_cli_loop(
 
         # Check for bash commands (!)
         if user_input.startswith("!"):
-            execute_bash_command(user_input)
+            # Run blocking bash command in executor to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, execute_bash_command, user_input)
             continue
 
         # Handle regular quit keywords
@@ -123,9 +127,7 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
     if not is_server_available():
         console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
         console.print()
-        console.print(
-            "The DeepAgents CLI requires the LangGraph server for thread management."
-        )
+        console.print("The DeepAgents CLI requires the LangGraph server for thread management.")
         console.print(
             "This enables features like message history, thread naming, and Studio integration."
         )
@@ -160,9 +162,7 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
         tools.append(web_search)
 
     if not USE_ASYNC_CHECKPOINTER:
-        console.print(
-            "[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]"
-        )
+        console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
         console.print(
             "[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]"
         )
@@ -179,13 +179,9 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
 
     try:
         # Keep context manager open for entire CLI session
-        async with AsyncSqliteSaver.from_conn_string(
-            str(checkpoint_db.resolve())
-        ) as checkpointer:
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db.resolve())) as checkpointer:
             # Create agent with async checkpointer
-            agent = create_agent_with_config(
-                model, assistant_id, tools, checkpointer=checkpointer
-            )
+            agent = create_agent_with_config(model, assistant_id, tools, checkpointer=checkpointer)
 
             # Calculate baseline token count for accurate token tracking
             system_prompt = get_system_prompt()

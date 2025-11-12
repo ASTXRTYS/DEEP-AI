@@ -1,16 +1,12 @@
 """Rich-enhanced UI components for DeepAgents CLI.
 
 This module provides beautiful terminal UI components using the Rich library,
-including panels, tables, progress bars, and interactive prompts integrated
-with Cement's shell utilities.
+including panels, tables, progress bars, and interactive prompts.
 """
 
-import os
-from typing import Any
 
-from cement.utils import shell
 from rich.console import Console, Group
-from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -20,20 +16,19 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
-from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from .config import COLORS, DEEP_AGENTS_ASCII
+from .config import COLORS, DEEP_AGENTS_ASCII, console
 
 
 class RichPrompt:
-    """Enhanced prompt system using Cement + Rich.
+    """Enhanced prompt system using Rich.
 
-    Provides beautiful, numbered menus with Rich styling and Cement's
-    reliable input handling.
+    Provides beautiful, numbered menus with Rich panels for display
+    and Rich's prompts for user input (IntPrompt, Confirm, Prompt).
     """
 
     def __init__(self, console: Console):
@@ -62,6 +57,8 @@ class RichPrompt:
         Returns:
             Selected value or None if cancelled
         """
+        from rich.prompt import IntPrompt
+
         # Clear screen for clean display
         self.console.clear()
 
@@ -78,27 +75,22 @@ class RichPrompt:
         self.console.print(panel)
         self.console.print()
 
-        # Get user input with Cement's numbered prompt
+        # Get user input with Rich's IntPrompt
         try:
-            # Build option list for Cement Prompt
+            # Build valid choices (1-indexed for user display)
             option_values = [opt[0] for opt in options]
-            option_labels = [f"{opt[1]}" for opt in options]
+            valid_choices = list(range(1, len(options) + 1))
 
-            prompt = shell.Prompt(
-                "Select an option",
-                options=option_labels,
-                numbered=True,
-                clear=False,  # We already cleared
-                max_attempts=5,
-                max_attempts_exception=False,
+            # Prompt for selection
+            choice = IntPrompt.ask(
+                "[bold cyan]Enter your choice[/bold cyan]",
+                choices=[str(i) for i in valid_choices],
+                show_choices=False,  # We already displayed choices in the panel
+                console=self.console,
             )
 
-            if prompt.input is None:
-                return None
-
-            # Map back to value
-            selected_index = option_labels.index(prompt.input)
-            return option_values[selected_index]
+            # Map back to value (convert from 1-indexed to 0-indexed)
+            return option_values[choice - 1]
 
         except KeyboardInterrupt:
             return None
@@ -113,24 +105,18 @@ class RichPrompt:
         Returns:
             True if confirmed, False otherwise
         """
-        default_text = "Y/n" if default else "y/N"
-        prompt_text = f"{message} [{default_text}]"
+        from rich.prompt import Confirm
 
         try:
-            prompt = shell.Prompt(
-                prompt_text,
-                options=["yes", "y", "no", "n"],
-                case_insensitive=True,
-                default="yes" if default else "no",
+            return Confirm.ask(
+                f"[bold yellow]{message}[/bold yellow]",
+                default=default,
+                console=self.console,
             )
-
-            return prompt.input.lower() in ["yes", "y"]
         except KeyboardInterrupt:
             return False
 
-    def text_input(
-        self, prompt: str, default: str = "", password: bool = False
-    ) -> str | None:
+    def text_input(self, prompt: str, default: str = "", password: bool = False) -> str | None:
         """Get text input from user.
 
         Args:
@@ -141,15 +127,15 @@ class RichPrompt:
         Returns:
             User input or None if cancelled
         """
+        from rich.prompt import Prompt
+
         try:
-            prompt_obj = shell.Prompt(
-                prompt,
-                default=default if default else None,
-                suppress=password,
-                max_attempts=5,
-                max_attempts_exception=False,
+            return Prompt.ask(
+                f"[bold cyan]{prompt}[/bold cyan]",
+                default=default if default else ...,  # Use ellipsis for no default
+                password=password,
+                console=self.console,
             )
-            return prompt_obj.input
         except KeyboardInterrupt:
             return None
 
@@ -219,6 +205,7 @@ class ProgressDisplay:
             TaskProgressColumn(),
             TimeElapsedColumn(),
             console=console,
+            transient=True,  # Clean up completed progress bars
         )
 
     def __enter__(self):
@@ -231,9 +218,7 @@ class ProgressDisplay:
         self.progress.stop()
 
 
-def create_status_table(
-    title: str, items: list[tuple[str, str, str | None]]
-) -> Table:
+def create_status_table(title: str, items: list[tuple[str, str, str | None]]) -> Table:
     """Create a beautiful status table.
 
     Args:
@@ -287,7 +272,7 @@ def create_thread_table(threads: list[dict], current_id: str) -> Table:
     for i, thread in enumerate(threads, 1):
         thread_id = thread["id"]
         thread_id_short = thread_id[:8] if len(thread_id) > 8 else thread_id
-        name = thread.get("name", "Untitled")
+        name = escape(thread.get("name", "Untitled"))  # Escape user input
         message_count = thread.get("message_count", 0)
         tokens = thread.get("total_tokens", 0)
 
@@ -363,10 +348,9 @@ def create_tree_view(title: str, data: dict) -> Tree:
 
 # Display functions for main CLI
 
+
 def display_ascii_banner() -> None:
     """Display the DeepAgents ASCII banner."""
-    from .config import console
-
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
@@ -378,8 +362,6 @@ def display_connection_status(connected: bool) -> None:
     Args:
         connected: Whether server is connected
     """
-    from .config import console
-
     if connected:
         console.print("[green]● Connected to LangGraph server[/green]")
     else:
@@ -389,15 +371,11 @@ def display_connection_status(connected: bool) -> None:
 
 def display_tavily_warning() -> None:
     """Display Tavily API warning."""
-    from .config import console
-
     console.print(
         "[yellow]⚠ Web search disabled:[/yellow] TAVILY_API_KEY not found.",
         style=COLORS["dim"],
     )
-    console.print(
-        "  To enable web search, set your Tavily API key:", style=COLORS["dim"]
-    )
+    console.print("  To enable web search, set your Tavily API key:", style=COLORS["dim"])
     console.print("    export TAVILY_API_KEY=your_api_key_here", style=COLORS["dim"])
     console.print(
         "  Or add it to your .env file. Get your key at: https://tavily.com",
@@ -414,11 +392,7 @@ def display_welcome(auto_approve: bool = False) -> None:
     """
     from pathlib import Path
 
-    from .config import console
-
-    console.print(
-        "... Ready to code! What would you like to build?", style=COLORS["agent"]
-    )
+    console.print("... Ready to code! What would you like to build?", style=COLORS["agent"])
     console.print(f"  [dim]Working directory: {Path.cwd()}[/dim]")
     console.print()
 
@@ -441,8 +415,6 @@ def display_server_error(error_message: str | None = None) -> None:
     Args:
         error_message: Optional error details
     """
-    from .config import console
-
     console.print("[red]✗ Failed to start server automatically[/red]")
     console.print()
 

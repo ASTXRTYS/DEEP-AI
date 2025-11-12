@@ -28,11 +28,10 @@ def _ensure_workspace_on_path() -> None:
 
 _ensure_workspace_on_path()
 
-# Import both the original and new Cement-based CLI
+# Main entry point
 from .cement_main import cement_main
-from .main import cli_main as cli_main_legacy
 
-# Default to Cement-based CLI
+# For backwards compatibility (though not recommended)
 cli_main = cement_main
 
-__all__ = ["cli_main", "cli_main_legacy", "cement_main"]
+__all__ = ["cement_main", "cli_main"]

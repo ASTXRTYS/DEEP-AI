@@ -26,6 +26,22 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _validate_thread_id(thread_id: str) -> None:
+    """Validate thread ID is proper UUID format (prevents path traversal attacks).
+
+    Args:
+        thread_id: Thread ID to validate
+
+    Raises:
+        ValueError: If thread ID is not a valid UUID format
+    """
+    import re
+
+    uuid_pattern = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
+    if not uuid_pattern.match(thread_id):
+        raise ValueError(f"Invalid thread ID format: {thread_id}")
+
+
 class ThreadMetadata(TypedDict, total=False):
     """Metadata for a conversation thread."""
 
@@ -206,6 +222,7 @@ class ThreadManager:
 
     def switch_thread(self, thread_id: str) -> None:
         """Switch to an existing thread."""
+        _validate_thread_id(thread_id)  # Validate before use
         now = _now_iso()
 
         with self.store.edit() as data:
@@ -312,6 +329,7 @@ class ThreadManager:
 
     def rename_thread(self, thread_id: str, new_name: str) -> None:
         """Rename a thread."""
+        _validate_thread_id(thread_id)  # Validate before use
         with self.store.edit() as data:
             thread = next((t for t in data.threads if t["id"] == thread_id), None)
             if not thread:
@@ -327,9 +345,10 @@ class ThreadManager:
             agent: Agent instance (optional, only used for local fallback)
 
         Raises:
-            ValueError: If trying to delete current thread or thread not found
-            LangGraphError: If server request fails
+            ValueError: If thread ID is invalid or thread doesn't exist
         """
+        _validate_thread_id(thread_id)  # Validate before use
+
         from .server_client import (
             LangGraphError,
             LangGraphTimeoutError,
@@ -504,6 +523,7 @@ class ThreadManager:
 
     def touch_thread(self, thread_id: str, *, reason: str | None = None) -> bool:
         """Update the last-used timestamp for the given thread."""
+        _validate_thread_id(thread_id)  # Validate before use
         timestamp = _now_iso()
         try:
             with self.store.edit() as data:

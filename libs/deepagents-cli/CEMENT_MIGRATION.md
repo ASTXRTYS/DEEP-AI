@@ -1,70 +1,73 @@
-# Migration to Cement + Rich CLI Framework
+# Cement + Rich CLI Framework
 
 ## Overview
 
-The DeepAgents CLI has been migrated from Questionary-based interactive menus to a Cement + Rich architecture. This document explains the changes, benefits, and new features.
+The DeepAgents CLI uses Rich library for beautiful terminal rendering with a clean menu navigation system. This document explains the architecture and features.
 
-## What Changed?
+## What Changed from Questionary?
 
 ### Before (Questionary)
 - **Arrow-key navigation**: Interactive menus with up/down arrow keys
 - **Procedural flow**: Sequential prompt-based interaction
 - **Limited structure**: Menu logic mixed with business logic
 
-### After (Cement + Rich)
-- **Numbered selection**: Type numbers to select menu options
-- **Controller-based architecture**: Structured, testable, maintainable code
+### After (Rich)
+- **Numbered selection**: Type numbers to select menu options using Rich.IntPrompt
+- **Clean architecture**: Structured, testable, maintainable code
 - **Enhanced visuals**: Beautiful Rich panels, tables, and styling
-- **Cement framework**: Industry-standard CLI application structure
+- **Separation of concerns**: Display (Rich) vs Logic (Application code)
 
-## New Architecture
+## Architecture
 
 ### Core Components
 
 ```
 deepagents_cli/
-├── cement_main.py           # Main Cement App and entry point
+├── cement_main.py           # Main entry point (argument parsing, command routing)
 ├── cement_interactive.py    # Interactive REPL loop
 ├── cement_menu_system.py    # Menu system with numbered selection
-├── rich_ui.py              # Rich UI components and utilities
-├── main.py                  # Legacy entry point (preserved)
-└── menu_system/            # Original Questionary system (preserved)
+├── rich_ui.py              # Rich UI components (RichPrompt, displays, tables)
+├── input.py                # prompt_toolkit session for main REPL
+└── ui.py                   # Token tracking, help display
 ```
 
 ### Entry Points
 
-The CLI now provides multiple entry points:
+The CLI provides a single, clean entry point:
 
-1. **Default (Cement-based)**: `deepagents` or `deepagents-cli`
-   - Uses the new Cement + Rich architecture
-   - Enhanced visual presentation
-   - Numbered menu selection
-
-2. **Legacy (Questionary-based)**: Access via `cli_main_legacy` (if needed)
-   - Original arrow-key navigation
-   - Preserved for compatibility testing
+**`deepagents` or `python -m deepagents_cli`**
+- Uses Rich for all visual output
+- Rich.IntPrompt for numbered menu selection
+- Enhanced visual presentation
+- Clean separation: Rich (display) + Rich (input)
 
 ## Key Features
 
-### 1. **Cement Framework Integration**
+### 1. **Clean Entry Point**
 
-The app now uses Cement's structured architecture:
+The app uses argparse for command-line argument handling:
 
 ```python
-from cement import App, Controller, ex
+def cement_main():
+    parser = argparse.ArgumentParser(description="DeepAgents CLI")
+    parser.add_argument("--agent", type=str, default="agent")
+    parser.add_argument("--auto-approve", action="store_true")
+    parser.add_argument("command", nargs="?", choices=["list", "reset", "help"])
+    args = parser.parse_args()
 
-class BaseController(Controller):
-    @ex(help="list all agents")
-    def list(self):
-        # Implementation
-        pass
+    if args.command:
+        # Handle commands
+        ...
+    else:
+        # Start interactive mode
+        asyncio.run(start_interactive_mode(args.agent, session_state))
 ```
 
 **Benefits:**
-- Clear command structure
-- Built-in help generation
-- Extensible architecture
-- Industry-standard patterns
+- Clear argument structure
+- Standard Python patterns
+- Easy to extend
+- Simple and maintainable
 
 ### 2. **Enhanced Rich UI Components**
 
@@ -181,7 +184,7 @@ Once started:
 
 ### 1. **Better Code Organization**
 - Clear separation of concerns
-- Controller-based architecture
+- Modular architecture
 - Testable components
 - Reusable utilities
 
@@ -205,13 +208,13 @@ Once started:
 
 ## Technical Details
 
-### Cement Prompt Integration
+### Rich UI Integration
 
-The `RichPrompt` class bridges Cement's shell utilities with Rich's beautiful output:
+The `RichPrompt` class uses Rich for both display and input:
 
 ```python
-from cement.utils import shell
 from rich.panel import Panel
+from rich.prompt import IntPrompt
 
 class RichPrompt:
     def menu(self, title, options, subtitle=None):
@@ -219,16 +222,21 @@ class RichPrompt:
         panel = Panel(content, title=title, border_style="cyan")
         console.print(panel)
 
-        # Use Cement's numbered prompt
-        prompt = shell.Prompt(
-            "Select an option",
-            options=option_labels,
-            numbered=True,
-            max_attempts=5
+        # Use Rich's IntPrompt for numbered selection
+        choice = IntPrompt.ask(
+            "[bold cyan]Enter your choice[/bold cyan]",
+            choices=[str(i) for i in range(1, len(options) + 1)],
+            console=console
         )
 
-        return prompt.input
+        return option_values[choice - 1]
 ```
+
+**Key Pattern:**
+- Rich Panel for visual display
+- Rich.IntPrompt for numerical input
+- Clean separation: display first, then input
+- No duplicate rendering
 
 ### Async Support
 

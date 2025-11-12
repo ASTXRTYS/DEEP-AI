@@ -4,8 +4,8 @@ Replaces the Questionary menu system with Cement prompts and Rich UI components.
 Provides numbered menu selection with beautiful visual presentation.
 """
 
-from typing import Any
 
+from rich.markup import escape
 from rich.panel import Panel
 
 from .config import SessionState, console
@@ -20,16 +20,14 @@ class CementMenuSystem:
     beautiful panels, and enhanced visual feedback.
     """
 
-    def __init__(self, session_state: SessionState, agent, token_tracker: TokenTracker):
+    def __init__(self, session_state: SessionState, token_tracker: TokenTracker):
         """Initialize the Cement menu system.
 
         Args:
             session_state: Current session state
-            agent: Compiled agent instance
             token_tracker: Token usage tracker
         """
         self.session_state = session_state
-        self.agent = agent
         self.token_tracker = token_tracker
         self.prompt = RichPrompt(console)
 
@@ -135,15 +133,16 @@ class CementMenuSystem:
         if choice is None or choice == "back":
             return None
 
-        # Show thread actions submenu
-        return self._show_thread_actions(choice, current_id)
+        # Show thread actions submenu (agent=None since delete isn't available in this flow)
+        return self._show_thread_actions(choice, current_id, agent=None)
 
-    def _show_thread_actions(self, thread_id: str, current_id: str) -> str | None:
+    def _show_thread_actions(self, thread_id: str, current_id: str, agent=None) -> str | None:
         """Show actions for a selected thread.
 
         Args:
             thread_id: Selected thread ID
             current_id: Current active thread ID
+            agent: Agent instance (required for delete operation)
 
         Returns:
             Action result
@@ -185,17 +184,20 @@ class CementMenuSystem:
         # Execute action
         if choice == "switch":
             thread_manager.switch_thread(thread_id)
-            console.print(f"[green]✓ Switched to thread: {thread_name}[/green]")
+            safe_name = escape(thread_name)  # Escape user input
+            console.print(f"[green]✓ Switched to thread: {safe_name}[/green]")
             console.print()
             input("Press Enter to continue...")
 
         elif choice == "rename":
+            safe_old_name = escape(thread_name)  # Escape user input
             new_name = self.prompt.text_input(
-                f"New name for '{thread_name}':", default=thread_name
+                f"New name for '{safe_old_name}':", default=thread_name
             )
             if new_name and new_name != thread_name:
                 thread_manager.rename_thread(thread_id, new_name)
-                console.print(f"[green]✓ Renamed thread to: {new_name}[/green]")
+                safe_new_name = escape(new_name)  # Escape user input
+                console.print(f"[green]✓ Renamed thread to: {safe_new_name}[/green]")
                 console.print()
                 input("Press Enter to continue...")
 
@@ -204,9 +206,10 @@ class CementMenuSystem:
             message_count = thread.get("message_count", 0)
             tokens = thread.get("total_tokens", 0)
 
+            safe_name = escape(thread_name)  # Escape user input
             console.print()
             panel = Panel(
-                f"[bold]Thread:[/bold] {thread_name}\n"
+                f"[bold]Thread:[/bold] {safe_name}\n"
                 f"[bold]Messages:[/bold] {message_count}\n"
                 f"[bold]Tokens:[/bold] {tokens:,}\n\n"
                 "[yellow]⚠ This action cannot be undone![/yellow]",
@@ -216,14 +219,12 @@ class CementMenuSystem:
             console.print(panel)
             console.print()
 
-            confirmed = self.prompt.confirm(
-                f"Delete thread '{thread_name}'?", default=False
-            )
+            confirmed = self.prompt.confirm(f"Delete thread '{safe_name}'?", default=False)
 
             if confirmed:
                 try:
-                    thread_manager.delete_thread(thread_id, self.agent)
-                    console.print(f"[green]✓ Deleted thread: {thread_name}[/green]")
+                    thread_manager.delete_thread(thread_id, agent)
+                    console.print(f"[green]✓ Deleted thread: {safe_name}[/green]")
                 except Exception as e:
                     console.print(f"[red]Failed to delete thread: {e}[/red]")
 

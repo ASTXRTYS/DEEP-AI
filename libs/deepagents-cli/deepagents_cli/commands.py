@@ -11,6 +11,7 @@ from pathlib import Path
 
 from langsmith import Client
 from requests.exceptions import HTTPError
+from rich.markup import escape
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
@@ -564,9 +565,10 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
         if action == "switch":
             try:
                 thread_manager.switch_thread(target_id)
+                safe_name = escape(thread_name)  # Escape user input
                 console.print()
                 console.print(
-                    f"[{COLORS['primary']}]✓ Switched to thread: {thread_name} ({short_id})[/{COLORS['primary']}]"
+                    f"[{COLORS['primary']}]✓ Switched to thread: {safe_name} ({short_id})[/{COLORS['primary']}]"
                 )
                 console.print()
             except ValueError as e:
@@ -582,8 +584,9 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
             # Perform deletion
             try:
                 thread_manager.delete_thread(target_id, agent)
+                safe_name = escape(thread_name)  # Escape user input
                 console.print()
-                console.print(f"[green]✓ Deleted thread: {thread_name} ({short_id})[/green]")
+                console.print(f"[green]✓ Deleted thread: {safe_name} ({short_id})[/green]")
                 console.print()
             except ValueError as e:
                 console.print()
@@ -629,9 +632,10 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
             try:
                 thread_manager.rename_thread(target_id, new_name.strip())
+                safe_new_name = escape(new_name.strip())  # Escape user input
                 console.print()
                 console.print(
-                    f"[{COLORS['primary']}]✓ Renamed thread to: {new_name.strip()} [dim]({short_id})[/dim][/{COLORS['primary']}]"
+                    f"[{COLORS['primary']}]✓ Renamed thread to: {safe_new_name} [dim]({short_id})[/dim][/{COLORS['primary']}]"
                 )
                 console.print()
             except ValueError as e:
@@ -757,10 +761,12 @@ async def handle_command(
             console.print()
             return True
 
-        from .menu_system import MenuSystem
+        from .cement_menu_system import CementMenuSystem
 
-        menu_system = MenuSystem(session_state, agent, token_tracker)
-        result = await menu_system.show_main_menu()
+        menu_system = CementMenuSystem(session_state, token_tracker)
+        # Run blocking menu call in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, menu_system.show_main_menu)
         if result == "exit":
             return "exit"
         return True

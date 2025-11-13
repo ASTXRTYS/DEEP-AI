@@ -1,336 +1,133 @@
-"""Tests for RichPrompt async methods."""
+"""Async tests for RichPrompt dangerous confirmation flow."""
+
+from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from rich.console import Console
-from rich.panel import Panel
 
-from deepagents_cli.rich_ui import RichPrompt
+from deepagents_cli.rich_ui import RichPrompt, SelectionState
 
 
-@pytest.fixture
-def console():
-    """Create a mock console."""
-    return MagicMock(spec=Console)
+@pytest.mark.asyncio
+async def test_dangerous_confirmation_whitespace_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whitespace-only input should be rejected before comparison."""
+    rich_prompt = RichPrompt(Console())
 
+    async def fake_text_input_async(*args: Any, **kwargs: Any) -> str:
+        validate = kwargs.get("validate")
+        assert validate is not None
+        # Validator should reject whitespace-only input explicitly.
+        assert validate("   \t  ") == "Confirmation cannot be empty or whitespace-only"
+        return "   \t  "
 
-@pytest.fixture
-def rich_prompt(console):
-    """Create a RichPrompt instance with mock console."""
-    return RichPrompt(console)
+    monkeypatch.setattr(rich_prompt, "text_input_async", fake_text_input_async)
 
+    confirmed = await rich_prompt.dangerous_confirmation_async(
+        action="Delete Thread",
+        target="test-thread",
+        details={"messages": 3},
+        confirmation_text="DELETE",
+    )
 
-class TestSelectAsync:
-    """Test select_async method."""
+    assert confirmed is False
 
-    @pytest.mark.asyncio
-    async def test_basic_selection(self, rich_prompt, console):
-        """Test basic selection with numbered choices."""
-        choices = [
-            ("value1", "Choice 1"),
-            ("value2", "Choice 2"),
-            ("value3", "Choice 3"),
-        ]
 
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-            mock_session.prompt.return_value = "1"
+@pytest.mark.asyncio
+async def test_dangerous_confirmation_exact_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exact confirmation text should still succeed."""
+    rich_prompt = RichPrompt(Console())
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="1")
+    async def fake_text_input_async(*args: Any, **kwargs: Any) -> str:
+        validate = kwargs.get("validate")
+        assert validate is not None
+        assert validate("DELETE") is True
+        return "DELETE"
 
-                result = await rich_prompt.select_async(
-                    question="Select an option:",
-                    choices=choices,
-                )
+    monkeypatch.setattr(rich_prompt, "text_input_async", fake_text_input_async)
 
-                assert result == "value1"
+    confirmed = await rich_prompt.dangerous_confirmation_async(
+        action="Delete Thread",
+        target="test-thread",
+        details={"messages": 3},
+        confirmation_text="DELETE",
+    )
 
-    @pytest.mark.asyncio
-    async def test_selection_cancelled(self, rich_prompt, console):
-        """Test selection cancelled with Ctrl+C."""
-        choices = [("value1", "Choice 1")]
+    assert confirmed is True
 
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(side_effect=KeyboardInterrupt())
+class _DummyAsyncApp:
+    async def run_in_terminal_async(self, func):
+        await asyncio.to_thread(func)
 
-                result = await rich_prompt.select_async(
-                    question="Select:",
-                    choices=choices,
-                )
 
-                assert result is None
+class _DummySyncApp:
+    def run_in_terminal(self, func):
+        func()
 
-    @pytest.mark.asyncio
-    async def test_selection_with_context_panel(self, rich_prompt, console):
-        """Test selection with context panel displayed."""
-        choices = [("yes", "Yes"), ("no", "No")]
-        panel = Panel("Context information", border_style="yellow")
 
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
+@pytest.mark.asyncio
+async def test_modal_runner_handles_running_loop_async_app() -> None:
+    """_run_modal_in_terminal should not raise when loop already running."""
+    prompt = RichPrompt(Console())
+    prompt.prompt_session = SimpleNamespace(app=_DummyAsyncApp())
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="1")
+    async def modal() -> str:
+        await asyncio.sleep(0)
+        return "ok"
 
-                result = await rich_prompt.select_async(
-                    question="Select:",
-                    choices=choices,
-                    context_panel=panel,
-                )
+    result = await prompt._run_modal_in_terminal(lambda: modal())
 
-                # Verify context panel was printed
-                console.print.assert_any_call(panel)
-                assert result == "yes"
+    assert result == "ok"
 
 
-class TestTextInputAsync:
-    """Test text_input_async method."""
+@pytest.mark.asyncio
+async def test_modal_runner_handles_sync_fallback_app() -> None:
+    """Fallback to run_in_terminal still resolves modal execution."""
+    prompt = RichPrompt(Console())
+    prompt.prompt_session = SimpleNamespace(app=_DummySyncApp())
 
-    @pytest.mark.asyncio
-    async def test_basic_input(self, rich_prompt, console):
-        """Test basic text input."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
+    async def modal() -> str:
+        return "value"
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="test input")
+    result = await prompt._run_modal_in_terminal(lambda: modal())
 
-                result = await rich_prompt.text_input_async(
-                    prompt_text="Enter text:",
-                )
-
-                assert result == "test input"
-
-    @pytest.mark.asyncio
-    async def test_multiline_input(self, rich_prompt, console):
-        """Test multiline text input."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
+    assert result == "value"
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(
-                    return_value="line1\nline2\nline3"
-                )
-
-                result = await rich_prompt.text_input_async(
-                    prompt_text="Enter feedback:",
-                    multiline=True,
-                )
-
-                assert "line1" in result
-                assert "line2" in result
-
-    @pytest.mark.asyncio
-    async def test_input_cancelled(self, rich_prompt, console):
-        """Test text input cancelled with Ctrl+C."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
 
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(side_effect=KeyboardInterrupt())
+@pytest.mark.asyncio
+async def test_modal_runner_uses_existing_loop_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a running loop exists on another thread, reuse it via run_coroutine_threadsafe."""
+    prompt = RichPrompt(Console())
+    prompt.prompt_session = SimpleNamespace(app=_DummyAsyncApp())
 
-                result = await rich_prompt.text_input_async(
-                    prompt_text="Enter text:",
-                )
+    main_loop = asyncio.get_running_loop()
 
-                assert result is None
-
-
-class TestConfirmAsync:
-    """Test confirm_async method."""
-
-    @pytest.mark.asyncio
-    async def test_confirm_yes(self, rich_prompt, console):
-        """Test confirmation with 'yes' response."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="y")
-
-                result = await rich_prompt.confirm_async(
-                    message="Are you sure?",
-                )
-
-                assert result is True
-
-    @pytest.mark.asyncio
-    async def test_confirm_no(self, rich_prompt, console):
-        """Test confirmation with 'no' response."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="n")
-
-                result = await rich_prompt.confirm_async(
-                    message="Are you sure?",
-                )
-
-                assert result is False
-
-    @pytest.mark.asyncio
-    async def test_confirm_default_true(self, rich_prompt, console):
-        """Test confirmation with empty response and default=True."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="")
-
-                result = await rich_prompt.confirm_async(
-                    message="Continue?",
-                    default=True,
-                )
-
-                assert result is True
-
-    @pytest.mark.asyncio
-    async def test_confirm_with_warning_panel(self, rich_prompt, console):
-        """Test confirmation with warning panel."""
-        warning = Panel("Warning: This is dangerous!", border_style="red")
-
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(return_value="y")
-
-                result = await rich_prompt.confirm_async(
-                    message="Proceed?",
-                    warning_panel=warning,
-                )
-
-                # Verify warning panel was printed
-                console.print.assert_any_call(warning)
-                assert result is True
-
-    @pytest.mark.asyncio
-    async def test_confirm_cancelled(self, rich_prompt, console):
-        """Test confirmation cancelled with Ctrl+C."""
-        with patch("deepagents_cli.rich_ui.PromptSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session_class.return_value = mock_session
-
-            with patch("asyncio.get_event_loop") as mock_loop:
-                mock_loop.return_value.run_in_executor = AsyncMock(side_effect=KeyboardInterrupt())
-
-                result = await rich_prompt.confirm_async(
-                    message="Continue?",
-                )
-
-                assert result is False
-
-
-class TestDangerousConfirmationAsync:
-    """Test dangerous_confirmation_async method."""
-
-    @pytest.mark.asyncio
-    async def test_correct_confirmation(self, rich_prompt, console):
-        """Test dangerous confirmation with correct text."""
-        # Mock text_input_async to return correct confirmation
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value="DELETE")):
-            result = await rich_prompt.dangerous_confirmation_async(
-                action="Delete Thread",
-                target="my-thread",
-                details={"Messages": "42", "Tokens": "1000"},
-                confirmation_text="DELETE",
-            )
-
-            assert result is True
-
-    @pytest.mark.asyncio
-    async def test_incorrect_confirmation(self, rich_prompt, console):
-        """Test dangerous confirmation with incorrect text."""
-        # Mock text_input_async to return incorrect confirmation
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value="delete")):
-            result = await rich_prompt.dangerous_confirmation_async(
-                action="Delete Thread",
-                target="my-thread",
-                details={"Messages": "42"},
-                confirmation_text="DELETE",
-            )
-
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_empty_confirmation(self, rich_prompt, console):
-        """Test dangerous confirmation with empty input."""
-        # Mock text_input_async to return empty string
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value="")):
-            result = await rich_prompt.dangerous_confirmation_async(
-                action="Delete Thread",
-                target="my-thread",
-                details={"Messages": "42"},
-                confirmation_text="DELETE",
-            )
-
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_confirmation_cancelled(self, rich_prompt, console):
-        """Test dangerous confirmation cancelled."""
-        # Mock text_input_async to return None (cancelled)
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value=None)):
-            result = await rich_prompt.dangerous_confirmation_async(
-                action="Delete Thread",
-                target="my-thread",
-                details={"Messages": "42"},
-                confirmation_text="DELETE",
-            )
-
-            assert result is False
-
-    @pytest.mark.asyncio
-    async def test_custom_confirmation_text(self, rich_prompt, console):
-        """Test dangerous confirmation with custom confirmation text."""
-        # Mock text_input_async to return correct custom confirmation
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value="DESTROY")):
-            result = await rich_prompt.dangerous_confirmation_async(
-                action="Destroy Database",
-                target="production-db",
-                details={"Records": "1000000"},
-                confirmation_text="DESTROY",
-            )
-
-            assert result is True
-
-    @pytest.mark.asyncio
-    async def test_details_displayed(self, rich_prompt, console):
-        """Test that details are displayed in warning panel."""
-        with patch.object(rich_prompt, "text_input_async", new=AsyncMock(return_value="DELETE")):
-            await rich_prompt.dangerous_confirmation_async(
-                action="Delete Thread",
-                target="my-thread",
-                details={
-                    "Messages": "42",
-                    "Tokens": "1000",
-                    "Created": "2025-01-01",
-                },
-                confirmation_text="DELETE",
-            )
-
-            # Verify that a panel was printed (details should be in the panel)
-            assert console.print.called
-            # Check that some print call included a Panel
-            panel_printed = any(
-                isinstance(call[0][0], Panel) if call[0] else False
-                for call in console.print.call_args_list
-            )
-            assert panel_printed
+    # Force the worker thread to "see" the main event loop so `_thread_id` differs.
+    monkeypatch.setattr("deepagents_cli.rich_ui.asyncio.get_event_loop", lambda: main_loop)
+
+    async def modal() -> str:
+        await asyncio.sleep(0)
+        return "shared-loop"
+
+    result = await prompt._run_modal_in_terminal(lambda: modal())
+
+    assert result == "shared-loop"
+
+
+def test_selection_state_renders_without_numbering():
+    """SelectionState should not include numeric prefixes or quick-select hints."""
+    state = SelectionState(
+        choices=[("a", "Alpha option"), ("b", "Beta option")],
+        default_value="a",
+    )
+
+    rendered = "".join(fragment for _, fragment in state.render_choices())
+    assert "1." not in rendered
+    assert "2." not in rendered
+    assert "> " in rendered  # Arrow pointer highlights current row

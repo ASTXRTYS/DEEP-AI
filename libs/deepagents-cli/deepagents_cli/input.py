@@ -3,6 +3,7 @@
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -18,10 +19,18 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 
 from .config import COLORS, COMMANDS, SessionState, console
+from .ui_constants import Colors, PromptTheme
 
 # Regex patterns for context-aware completion
 AT_MENTION_RE = re.compile(r"@(?P<path>(?:[^\s@]|(?<=\\)\s)*)$")
 SLASH_COMMAND_RE = re.compile(r"^/(?P<command>[^\n]*)$")
+
+
+@dataclass
+class SessionReference:
+    """Mutable wrapper so toolbar can safely access session once initialized."""
+
+    session: PromptSession | None = None
 
 
 class FilePathCompleter(Completer):
@@ -125,7 +134,7 @@ def parse_file_mentions(text: str) -> tuple[str, list[Path]]:
 
 
 def get_bottom_toolbar(
-    session_state: SessionState, session_ref: dict
+    session_state: SessionState, session_ref: SessionReference
 ) -> Callable[[], list[tuple[str, str]]]:
     """Return toolbar function that shows auto-approve status and BASH MODE."""
 
@@ -133,16 +142,12 @@ def get_bottom_toolbar(
         parts = []
 
         # Check if we're in BASH mode (input starts with !)
-        try:
-            session = session_ref.get("session")
-            if session:
-                current_text = session.default_buffer.text
-                if current_text.startswith("!"):
-                    parts.append(("bg:#ff1493 #ffffff bold", " BASH MODE "))
-                    parts.append(("", " | "))
-        except (AttributeError, TypeError):
-            # Silently ignore - toolbar is non-critical and called frequently
-            pass
+        session = session_ref.session
+        if session:
+            current_text = session.default_buffer.text
+            if current_text.startswith("!"):
+                parts.append((f"bg:{Colors.BASH_MODE_HEX} #ffffff bold", " BASH MODE "))
+                parts.append(("", " | "))
 
         # Base status message
         if session_state.auto_approve:
@@ -168,11 +173,19 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
     # Create key bindings
     kb = KeyBindings()
 
+    def flash_auto_approve_status(app) -> None:
+        """Display a transient status message when auto-approve is toggled."""
+        status = "ON" if session_state.auto_approve else "OFF"
+        color = Colors.PRIMARY_HEX if session_state.auto_approve else Colors.WARNING_HEX
+        message = HTML(f'\n<style fg="{color}"><b>[Auto-approve: {status}]</b></style>\n')
+        app.print_text(message)
+
     # Bind Ctrl+T to toggle auto-approve
     @kb.add("c-t")
     def _(event) -> None:
         """Toggle auto-approve mode."""
         session_state.toggle_auto_approve()
+        flash_auto_approve_status(event.app)
         # Force UI refresh to update toolbar
         event.app.invalidate()
 
@@ -244,14 +257,14 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
     # Define styles for the toolbar with full-width background colors
     toolbar_style = Style.from_dict(
         {
-            "bottom-toolbar": "noreverse",  # Disable default reverse video
-            "toolbar-green": "bg:#10b981 #000000",  # Green for auto-accept ON
-            "toolbar-orange": "bg:#f59e0b #000000",  # Orange for manual accept
+            "bottom-toolbar": PromptTheme.TOOLBAR_BASE,  # Disable default reverse video
+            "toolbar-green": PromptTheme.TOOLBAR_ENABLED,  # Green for auto-accept ON
+            "toolbar-orange": PromptTheme.TOOLBAR_MANUAL,  # Orange for manual accept
         }
     )
 
-    # Create session reference dict for toolbar to access session
-    session_ref = {}
+    # Create session reference holder so toolbar can read session safely
+    session_ref = SessionReference()
 
     # Create the session
     session = PromptSession(
@@ -268,10 +281,10 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
             session_state, session_ref
         ),  # Persistent status bar at bottom
         style=toolbar_style,  # Apply toolbar styling
-        reserve_space_for_menu=7,  # Reserve space for completion menu to show 5-6 results
+        reserve_space_for_menu=0,  # Dynamic sizing prevents blank gaps when typing
     )
 
     # Store session reference for toolbar to access
-    session_ref["session"] = session
+    session_ref.session = session
 
     return session

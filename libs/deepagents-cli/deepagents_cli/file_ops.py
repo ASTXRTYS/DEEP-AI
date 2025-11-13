@@ -230,6 +230,54 @@ def build_approval_preview(
             diff_title=f"Diff {display_path}",
         )
 
+    if tool_name == "shell":
+        import os
+
+        command = str(args.get("command", ""))
+        working_dir = os.getcwd()
+        details = [
+            f"Command: {command}",
+            f"Working directory: {working_dir}",
+            "⚠️  Warning: Shell commands have full system access",
+            "⚠️  Review carefully before approving",
+        ]
+        return ApprovalPreview(
+            title="Execute Shell Command",
+            details=details,
+        )
+
+    if tool_name == "web_search":
+        query = str(args.get("query", ""))
+        max_results = args.get("max_results", 5)
+        details = [
+            f"Query: {query}",
+            f"Max results: {max_results}",
+            "⚠️  Note: This will consume Tavily API credits",
+        ]
+        return ApprovalPreview(
+            title="Web Search",
+            details=details,
+        )
+
+    if tool_name == "task":
+        task_description = str(args.get("description", ""))
+        instructions = str(args.get("instructions", ""))
+        details = [
+            f"Task: {task_description}",
+        ]
+        if instructions:
+            details.append(f"Instructions: {instructions}")
+        details.extend(
+            [
+                "⚠️  Subagent will have access to same tools and filesystem",
+                "⚠️  Review task description carefully",
+            ]
+        )
+        return ApprovalPreview(
+            title="Spawn Subagent",
+            details=details,
+        )
+
     return None
 
 

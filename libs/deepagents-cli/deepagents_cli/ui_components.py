@@ -104,8 +104,8 @@ def create_thread_table() -> Table:
 
     table.add_column("ID", style="dim", width=10)
     table.add_column("Name", style="bold", no_wrap=False)
-    table.add_column("Messages", justify="right", style="cyan")
-    table.add_column("Tokens", justify="right", style="green")
+    table.add_column("Messages", justify="right", style=Colors.PRIMARY)
+    table.add_column("Tokens", justify="right", style=Colors.PRIMARY)
     table.add_column("Status", justify="center", width=10)
 
     return table
@@ -126,8 +126,8 @@ def create_token_stats_table() -> Table:
     )
 
     table.add_column("Metric", style="bold")
-    table.add_column("Count", justify="right", style="cyan")
-    table.add_column("Cost", justify="right", style="green")
+    table.add_column("Count", justify="right", style=Colors.PRIMARY)
+    table.add_column("Cost", justify="right", style=Colors.PRIMARY)
 
     return table
 
@@ -194,7 +194,7 @@ def format_thread_summary(
     ]
 
     if is_current:
-        parts.append(f"{Icons.BULLET} [cyan]current[/cyan]")
+        parts.append(f"{Icons.BULLET} [{Colors.PRIMARY}]current[/{Colors.PRIMARY}]")
 
     return "  ".join(parts)
 
@@ -210,11 +210,11 @@ def format_token_count(tokens: int) -> Text:
     """
     # Color code based on magnitude
     if tokens < 1000:
-        style = "green"
+        style = Colors.SUCCESS
     elif tokens < 10000:
-        style = "yellow"
+        style = Colors.WARNING
     else:
-        style = "red"
+        style = Colors.ERROR
 
     # Format with K suffix if >= 1000
     if tokens >= 1000:
@@ -235,10 +235,10 @@ def format_cost(cost: float) -> Text:
         Rich Text object with currency formatting
     """
     if cost < 0.01:
-        return Text(f"${cost:.4f}", style="green")
+        return Text(f"${cost:.4f}", style=Colors.SUCCESS)
     if cost < 0.10:
-        return Text(f"${cost:.3f}", style="yellow")
-    return Text(f"${cost:.2f}", style="red")
+        return Text(f"${cost:.3f}", style=Colors.WARNING)
+    return Text(f"${cost:.2f}", style=Colors.ERROR)
 
 
 def create_divider(char: str = "─", style: str = "dim") -> Text:

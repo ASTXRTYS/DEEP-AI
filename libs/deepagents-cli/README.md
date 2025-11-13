@@ -88,6 +88,40 @@ deepagents help
 - `/new [name]` - Create new thread
 - `/threads` - Interactive picker to list and switch threads
 
+### Menu Navigation & Keyboard Shortcuts
+
+- `/` (bare slash) opens the canonical menu; `/menu` and `/m` route into the exact same flow.
+- `Ctrl+M` opens the menu from anywhere (even inside modals) and returns to the REPL when closed.
+- `Ctrl+T` toggles auto-approve globally; the toolbar always reflects the current mode.
+- `↑/↓`, `PageUp/PageDown`, and `Home/End` move through lists; `Enter` selects, `Esc` cancels (Esc clears filters first, Esc twice confirms cancel).
+- Arrow-only navigation is enforced across Rich and fallback terminals—numeric quick-selects have been removed entirely.
+
+### Fallback & Compatibility
+
+- `DEEPAGENTS_FALLBACK_UI=1` forces the compact arrow-only selector (helpful for CI or minimal terminals).
+- `NO_COLOR=1` disables color while keeping emphasis (bold/dim) where supported.
+- `DEEPAGENTS_NO_EMOJI=1` switches all iconography to ASCII-only equivalents.
+- Non-TTY or `TERM=dumb` environments cannot open interactive selectors—use slash commands such as `/threads`, `/handoff`, `/tokens`, etc.
+
+### Iconography
+
+The CLI prints semantic icons (✓/✗/⚠/ℹ/▶/●) when the terminal supports them. When `DEEPAGENTS_NO_EMOJI=1` is set, the following ASCII substitutions are used so the copy stays legible in minimal environments:
+
+| Emoji | ASCII |
+|-------|-------|
+| ✓     | OK    |
+| ✗     | X     |
+| ⚠     | WARN  |
+| ℹ     | INFO  |
+| ▶     | >     |
+| ●     | *     |
+
+### Supported Terminals
+
+- Verified on macOS Terminal/iTerm2, modern Linux terminals, and Windows Terminal (with VT enabled).
+- Legacy Windows `cmd.exe` or other non-VT terminals should rely on the fallback selector or slash commands.
+- Interactive menus require a TTY; piping/redirecting output disables selection UIs by design.
+
 ### Memory System
 
 The agent has persistent memory across sessions:
@@ -104,6 +138,15 @@ Stored in: `~/.deepagents/{agent_name}/`
 **Conversation Memory**: Automatically saved, resume with same agent name
 
 **Long-term Store**: Shared knowledge across all conversations (PostgreSQL)
+
+### Prompt Safety Controls
+
+Legacy synchronous prompts (numbered menus, confirm dialogs, and text inputs) now run behind a safety wrapper so CI jobs or unattended sessions never hang forever. Tune with environment variables:
+
+- `DEEPAGENTS_PROMPT_MAX_ATTEMPTS` (default `3`): maximum retries before failing prompts gracefully
+- `DEEPAGENTS_PROMPT_TIMEOUT_SECONDS` (default `30`): total wall-clock time allowed for a prompt before it auto-aborts
+
+When either limit is exceeded the CLI prints a helpful error and returns `None` to the caller (or `None`/`False` for legacy bool prompts), allowing automation flows to continue without manual intervention instead of hanging forever.
 
 ### Thread Cleanup & Maintenance
 

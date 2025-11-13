@@ -18,7 +18,7 @@ from requests import exceptions as requests_exceptions
 from .thread_store import ThreadStore, ThreadStoreCorruptError, ThreadStoreData
 
 if TYPE_CHECKING:
-    from langgraph.graph.graph import CompiledGraph
+    from langgraph.graph.state import CompiledStateGraph
 
 
 def _now_iso() -> str:
@@ -257,7 +257,7 @@ class ThreadManager:
 
     def fork_thread(
         self,
-        agent: CompiledGraph,
+        agent: CompiledStateGraph,
         source_thread_id: str | None = None,
         name: str | None = None,
     ) -> str:
@@ -337,7 +337,7 @@ class ThreadManager:
                 raise ValueError(msg)
             thread["name"] = new_name
 
-    def delete_thread(self, thread_id: str, agent: CompiledGraph | None = None) -> None:
+    def delete_thread(self, thread_id: str, agent: CompiledStateGraph | None = None) -> None:
         """Delete a thread and its checkpoints via server API.
 
         Args:
@@ -409,7 +409,7 @@ class ThreadManager:
     # Maintenance operations
     # ------------------------------------------------------------------
     def cleanup_old_threads(
-        self, days_old: int, agent: CompiledGraph, dry_run: bool = False
+        self, days_old: int, agent: CompiledStateGraph, dry_run: bool = False
     ) -> tuple[int, list[str]]:
         """Delete threads whose last activity predates the cutoff."""
         data = self._safe_load()

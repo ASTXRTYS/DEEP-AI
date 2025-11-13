@@ -8,9 +8,11 @@ import asyncio
 import sys
 from pathlib import Path
 
+from prompt_toolkit.patch_stdout import patch_stdout
+
 from .cement_menu_system import CementMenuSystem
 from .commands import execute_bash_command, handle_command
-from .config import SessionState, console
+from .config import SessionState, console, handle_error
 from .execution import execute_task
 from .input import create_prompt_session
 from .rich_ui import (
@@ -51,12 +53,13 @@ async def simple_cli_loop(
     token_tracker = TokenTracker()
     token_tracker.set_baseline(baseline_tokens)
 
-    # Create menu system (agent not stored, passed to methods that need it)
-    menu_system = CementMenuSystem(session_state, token_tracker)
+    # Create menu system with active agent and session reference (needed for unified lifecycle)
+    menu_system = CementMenuSystem(session_state, token_tracker, agent, session)
 
     while True:
         try:
-            user_input = await session.prompt_async()
+            with patch_stdout():
+                user_input = await session.prompt_async()
             user_input = user_input.strip()
         except EOFError:
             break
@@ -68,9 +71,7 @@ async def simple_cli_loop(
         # Check if menu was requested via Ctrl+M
         if session_state.menu_requested:
             session_state.menu_requested = False  # Reset flag
-            # Run blocking menu call in executor to avoid blocking event loop
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, menu_system.show_main_menu)
+            result = await menu_system.show_main_menu()
             if result == "exit":
                 console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
                 break
@@ -79,9 +80,17 @@ async def simple_cli_loop(
         if not user_input:
             continue
 
+        # Bare "/" always opens the canonical main menu (no duplicate implementations)
+        if user_input == "/":
+            result = await menu_system.show_main_menu()
+            if result == "exit":
+                console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
+                break
+            continue
+
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = await handle_command(user_input, agent, token_tracker, session_state)
+            result = await handle_command(user_input, agent, token_tracker, session_state, session)
             if result == "exit":
                 console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
                 break
@@ -92,7 +101,7 @@ async def simple_cli_loop(
         # Check for bash commands (!)
         if user_input.startswith("!"):
             # Run blocking bash command in executor to avoid blocking event loop
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, execute_bash_command, user_input)
             continue
 
@@ -101,7 +110,7 @@ async def simple_cli_loop(
             console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
             break
 
-        await execute_task(user_input, agent, assistant_id, session_state, token_tracker)
+        await execute_task(user_input, agent, assistant_id, session_state, token_tracker, session)
 
         # Check if handoff was approved and needs thread switch
         if session_state.pending_handoff_child_id:
@@ -125,7 +134,7 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
 
     # Check if server is running, offer to start if not
     if not is_server_available():
-        console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
+        console.print("[yellow]WARNING: LangGraph server is not running[/yellow]")
         console.print()
         console.print("The DeepAgents CLI requires the LangGraph server for thread management.")
         console.print(
@@ -162,7 +171,7 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
         tools.append(web_search)
 
     if not USE_ASYNC_CHECKPOINTER:
-        console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
+        console.print("[yellow]WARNING: Async checkpointer disabled (not recommended)[/yellow]")
         console.print(
             "[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]"
         )
@@ -193,5 +202,4 @@ async def start_interactive_mode(assistant_id: str, session_state: SessionState)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:
-        console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
-        raise
+        handle_error(e, context="interactive mode startup", fatal=True, show_traceback=True)

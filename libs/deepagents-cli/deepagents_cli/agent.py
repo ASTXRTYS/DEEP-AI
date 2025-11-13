@@ -20,6 +20,7 @@ from langgraph.store.postgres import PostgresStore
 
 from .agent_memory import AgentMemoryMiddleware
 from .config import COLORS, config, console, get_default_coding_instructions
+from .ui_constants import Colors
 
 
 def list_agents() -> None:
@@ -64,7 +65,7 @@ def reset_agent(agent_name: str, source_agent: str | None = None) -> None:
 
         if not source_md.exists():
             console.print(
-                f"[bold red]Error:[/bold red] Source agent '{source_agent}' not found or has no agent.md"
+                f"[bold {Colors.ERROR}]Error:[/bold {Colors.ERROR}] Source agent '{source_agent}' not found or has no agent.md"
             )
             return
 

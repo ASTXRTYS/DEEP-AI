@@ -260,10 +260,10 @@ def render_todo_list(todos: list[dict]) -> None:
 
         if status == "completed":
             icon = "☑"
-            style = "green"
+            style = Colors.SUCCESS
         elif status == "in_progress":
             icon = "⏳"
-            style = "yellow"
+            style = Colors.WARNING
         else:  # pending
             icon = "☐"
             style = "dim"
@@ -273,7 +273,7 @@ def render_todo_list(todos: list[dict]) -> None:
     panel = Panel(
         "\n".join(lines),
         title="[bold]Task List[/bold]",
-        border_style="cyan",
+        border_style=Colors.PRIMARY,
         box=box.ROUNDED,
         padding=(0, 1),
     )
@@ -312,7 +312,7 @@ def render_file_operation(record: FileOperationRecord) -> None:
         console.print(detail)
 
     if record.status == "error":
-        _print_detail(record.error or "Error executing file operation", style="red")
+        _print_detail(record.error or "Error executing file operation", style=Colors.ERROR)
         return
 
     if record.tool_name == "read_file":
@@ -519,14 +519,30 @@ def show_interactive_help() -> None:
     console.print(commands_panel)
     console.print()
 
+    navigation_content = (
+        "[cyan]/ (bare slash)[/cyan]  Opens the canonical menu (same flow as Ctrl+M)\n"
+        "[cyan]Ctrl+M[/cyan]          Opens the menu from anywhere • returns to REPL after closing\n"
+        "[cyan]↑/↓ + Enter[/cyan]     Arrow-only selection across menus, lists, and confirmations\n"
+        "[cyan]Esc[/cyan]             Clears filters first, then cancels (Esc twice confirms cancel)\n"
+        "[cyan]Ctrl+T[/cyan]          Toggles auto-approve globally (hint shown in toolbar)"
+    )
+    navigation_panel = Panel(
+        navigation_content,
+        title="[bold]Navigation & Menu[/bold]",
+        border_style=Colors.PRIMARY,
+        padding=(1, 2),
+    )
+    console.print(navigation_panel)
+    console.print()
+
     # Keyboard shortcuts section
     shortcuts_content = (
         "[cyan]Enter[/cyan]           Submit your message\n"
         "[cyan]Alt+Enter[/cyan]       Insert newline (Option+Enter or ESC then Enter)\n"
         "[cyan]Ctrl+E[/cyan]          Open in external editor\n"
         "[cyan]Ctrl+T[/cyan]          Toggle auto-approve mode\n"
-        "[cyan]Ctrl+M[/cyan]          Open menu\n"
-        "[cyan]Arrow keys[/cyan]      Navigate input\n"
+        "[cyan]Ctrl+M[/cyan]          Open menu (same as typing /)\n"
+        "[cyan]Arrow keys[/cyan]      Navigate input + menu selections\n"
         "[cyan]Ctrl+C[/cyan]          Cancel input or interrupt agent"
     )
     shortcuts_panel = Panel(
@@ -536,6 +552,21 @@ def show_interactive_help() -> None:
         padding=(1, 2),
     )
     console.print(shortcuts_panel)
+    console.print()
+
+    compatibility_content = (
+        "[cyan]DEEPAGENTS_FALLBACK_UI=1[/cyan]    Force compact arrow-only selector (CI/minimal TTY)\n"
+        "[cyan]NO_COLOR=1[/cyan]                  Disable color while keeping emphasis styles\n"
+        "[cyan]DEEPAGENTS_NO_EMOJI=1[/cyan]       Switch to ASCII iconography globally\n"
+        "[cyan]Non-TTY / TERM=dumb[/cyan]         Use slash commands (/threads, /handoff, /tokens)"
+    )
+    compatibility_panel = Panel(
+        compatibility_content,
+        title="[bold]Compatibility & Fallbacks[/bold]",
+        border_style=Colors.PRIMARY,
+        padding=(1, 2),
+    )
+    console.print(compatibility_panel)
     console.print()
 
     # Special features section

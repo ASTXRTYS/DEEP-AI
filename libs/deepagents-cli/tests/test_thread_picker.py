@@ -1,48 +1,80 @@
-"""Tests for the interactive thread picker fallbacks."""
+"""Tests for the interactive thread picker."""
 
 from __future__ import annotations
 
-import builtins
-from datetime import UTC, datetime
+from collections import deque
 
-from deepagents_cli import commands
+import pytest
+
+from deepagents_cli.commands import _select_thread_interactively
+from deepagents_cli.config import SessionState
 
 
 def _sample_thread(idx: int) -> dict:
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
         "id": f"thread-{idx:02d}-abcdef0123456789",
         "assistant_id": "unit-test",
-        "created": now,
-        "last_used": now,
-        "parent_id": None,
+        "created": "2025-01-11T10:00:00Z",
+        "last_used": "2025-01-11T11:00:00Z",
+        "message_count": 10 + idx,
+        "token_count": 1500 + idx,
         "name": f"Thread {idx}",
     }
 
 
-def test_select_thread_fallback_defaults_to_current(monkeypatch):
-    threads = [_sample_thread(1), _sample_thread(2), _sample_thread(3)]
+@pytest.mark.asyncio
+async def test_thread_picker_switch_action(monkeypatch):
+    """Ensure picker returns (thread_id, action) when selections succeed."""
+    threads = [_sample_thread(1), _sample_thread(2)]
+    actions = deque([threads[1]["id"], "switch"])
 
-    current_id = threads[1]["id"]
+    class PromptStub:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.select_async_call_count = 0
 
-    def fake_input(prompt: str) -> str:
-        return ""  # Accept default
+        async def select_async(self, **_: object) -> str | None:
+            self.select_async_call_count += 1
+            return actions.popleft()
 
-    monkeypatch.setattr(builtins, "input", fake_input)
+    monkeypatch.setattr("deepagents_cli.commands.RichPrompt", PromptStub)
+    monkeypatch.setattr("deepagents_cli.commands.check_server_availability", lambda: False)
 
-    selected = commands._select_thread_interactively(threads, current_id)
+    session_state = SessionState(auto_approve=False, thread_manager=None)
 
-    assert selected == current_id
+    selected_id, action = await _select_thread_interactively(
+        threads,
+        current_thread_id=threads[0]["id"],
+        session_state=session_state,
+        prompt_session=None,
+    )
+
+    assert selected_id == threads[1]["id"]
+    assert action == "switch"
 
 
-def test_select_thread_fallback_accepts_numeric_choice(monkeypatch):
-    threads = [_sample_thread(1), _sample_thread(2), _sample_thread(3)]
+@pytest.mark.asyncio
+async def test_thread_picker_cancel_path(monkeypatch):
+    """Ensure picker gracefully handles cancellation in either phase."""
+    threads = [_sample_thread(1), _sample_thread(2)]
 
-    def fake_input(prompt: str) -> str:
-        return "3"  # Select third entry
+    # First select returns None to simulate cancellation during thread selection.
+    class PromptStub:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
 
-    monkeypatch.setattr(builtins, "input", fake_input)
+        async def select_async(self, **_: object) -> str | None:
+            return None
 
-    selected = commands._select_thread_interactively(threads, threads[0]["id"])
+    monkeypatch.setattr("deepagents_cli.commands.RichPrompt", PromptStub)
+    monkeypatch.setattr("deepagents_cli.commands.check_server_availability", lambda: False)
 
-    assert selected == threads[2]["id"]
+    session_state = SessionState(auto_approve=False, thread_manager=None)
+    selected_id, action = await _select_thread_interactively(
+        threads,
+        current_thread_id=threads[0]["id"],
+        session_state=session_state,
+        prompt_session=None,
+    )
+
+    assert selected_id is None
+    assert action is None

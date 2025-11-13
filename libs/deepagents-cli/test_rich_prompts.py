@@ -21,7 +21,7 @@ async def test_select_async():
 
     # Test with context panel
     context_panel = Panel(
-        "[bold yellow]⚠️  This is a test approval prompt[/bold yellow]\n\n"
+        "[bold yellow]WARNING: Test approval prompt[/bold yellow]\n\n"
         "Testing the new Rich-based selection menu that replaced Questionary.",
         border_style="yellow",
         padding=(0, 1),

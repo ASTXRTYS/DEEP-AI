@@ -6,59 +6,42 @@ import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
 from pathlib import Path
 
 from langsmith import Client
-from requests.exceptions import HTTPError
+
+try:
+    from httpx import HTTPStatusError as HttpxHTTPStatusError
+    from httpx import RequestError as HttpxRequestError
+except Exception:  # pragma: no cover - httpx may be indirect dep
+
+    class HttpxHTTPStatusError(Exception):  # type: ignore
+        pass
+
+    class HttpxRequestError(Exception):  # type: ignore
+        pass
+
+
 from rich.markup import escape
+from rich.panel import Panel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import COLORS, DEEP_AGENTS_ASCII, console
+from .config import COLORS, DEEP_AGENTS_ASCII, console, handle_error
 from .execution import execute_task
-from .rich_ui import RichPrompt
-from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
+from .rich_ui import RichPrompt, create_thread_table
+from .thread_display import (
+    check_server_availability,
+    enrich_thread_with_server_data,
+    format_thread_summary,
+)
 from .ui import TokenTracker, show_interactive_help
+from .ui_constants import Colors
 
 logger = logging.getLogger(__name__)
 
 # Simple TTL cache (5 minutes)
 _metrics_cache = {}
 _cache_ttl = 300  # seconds
-
-
-def relative_time(iso_timestamp: str) -> str:
-    """Convert ISO timestamp to relative time string.
-
-    Args:
-        iso_timestamp: ISO 8601 timestamp (e.g., "2025-01-11T20:30:00Z")
-
-    Returns:
-        Human-readable relative time (e.g., "2h ago", "just now")
-    """
-    try:
-        # Parse ISO timestamp (with or without 'Z')
-        ts_str = iso_timestamp.rstrip("Z")
-        ts = datetime.fromisoformat(ts_str)
-        ts = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
-
-        now = datetime.now(UTC)
-        delta = now - ts
-
-        seconds = delta.total_seconds()
-
-        if seconds < 60:
-            return "just now"
-        if seconds < 3600:
-            mins = int(seconds / 60)
-            return f"{mins}m ago"
-        if seconds < 86400:
-            hours = int(seconds / 3600)
-            return f"{hours}h ago"
-        days = int(seconds / 86400)
-        return f"{days}d ago"
-    except Exception:
-        return iso_timestamp
 
 
 def get_langsmith_client() -> Client | None:
@@ -72,7 +55,7 @@ def get_langsmith_client() -> Client | None:
 
 
 @retry(
-    retry=retry_if_exception_type(HTTPError),
+    retry=retry_if_exception_type((HttpxHTTPStatusError, HttpxRequestError)),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
@@ -122,12 +105,19 @@ def _fetch_langsmith_metrics_sync(
         logger.debug(f"Fetched: {trace_count} traces, {total_tokens:,} tokens")
         return trace_count, total_tokens
 
-    except HTTPError as e:
-        if e.response.status_code == 429:
+    except HttpxHTTPStatusError as e:
+        try:
+            status = e.response.status_code if e.response is not None else None
+        except Exception:
+            status = None
+        if status == 429:
             logger.warning(f"Rate limited on thread {thread_id[:8]}, retrying...")
             # Let retry handle it
             raise
-        logger.error(f"HTTPError fetching metrics for {thread_id[:8]}: {e}")
+        logger.error(f"HTTP status error fetching metrics for {thread_id[:8]}: {e}")
+        return None, None
+    except HttpxRequestError as e:
+        logger.error(f"HTTP request error fetching metrics for {thread_id[:8]}: {e}")
         return None, None
     except Exception as e:
         logger.error(f"Error fetching metrics for {thread_id[:8]}: {e}")
@@ -159,7 +149,7 @@ async def _get_langsmith_metrics_async(
             return cached_data
 
     # Run blocking call in thread pool
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         executor, _fetch_langsmith_metrics_sync, thread_id, client, project_name
     )
@@ -220,151 +210,125 @@ async def _enrich_threads_with_metrics(
     return threads
 
 
-def _enrich_thread_with_server_data(thread: dict) -> dict:
-    """Enrich thread metadata with data from server API.
-
-    Args:
-        thread: Thread metadata from threads.json
-
-    Returns:
-        Enriched thread dict with preview and auto-name
-    """
-    thread_data = get_thread_data(thread["id"])
-
-    if thread_data:
-        # Auto-name unnamed threads using first message
-        if not thread.get("name") or thread.get("name") == "(unnamed)":
-            first_msg = extract_first_user_message(thread_data)
-            if first_msg:
-                thread["display_name"] = first_msg
-            else:
-                thread["display_name"] = "(unnamed)"
-        else:
-            thread["display_name"] = thread["name"]
-
-        # Add message preview
-        preview = extract_last_message_preview(thread_data)
-        if preview:
-            thread["preview"] = preview
-    else:
-        # Server not available - fallback
-        thread["display_name"] = thread.get("name") or "(unnamed)"
-
-    return thread
-
-
-def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
-    """Build a single-line summary matching LangSmith UI format."""
-    display_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
-    short_id = thread["id"][:8]
-    last_used = relative_time(thread.get("last_used", ""))
-
-    # Get LangSmith metrics
-    trace_count = thread.get("trace_count")
-    tokens = thread.get("langsmith_tokens", 0)
-
-    # Format trace count (distinguish error from empty)
-    if trace_count is None:
-        trace_display = "??"  # Error state
-    else:
-        trace_display = str(trace_count)
-
-    # Format tokens with K/M abbreviations OR comma separators
-    if tokens >= 1_000_000:
-        token_display = f"{tokens / 1_000_000:.1f}M"
-    elif tokens >= 1_000:
-        token_display = f"{tokens / 1_000:.1f}K"
-    else:
-        token_display = f"{tokens:,}"  # Comma separators for <1K
-
-    # Build stats like LangSmith: "12 traces · 34.5K tokens"
-    stats = f"{trace_display} traces · {token_display} tokens"
-
-    current_suffix = " · current" if thread["id"] == current_thread_id else ""
-
-    preview = thread.get("preview")
-    if preview:
-        return f"{short_id}  {display_name}  · {stats}  · {preview}  · {last_used}{current_suffix}"
-    return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
-
-
 async def _select_thread_with_rich(
-    threads, current_thread_id: str | None
+    threads, current_thread_id: str | None, session_state, prompt_session
 ) -> tuple[str, str] | tuple[None, None]:
     """Interactive thread picker using Rich prompts.
 
     Args:
         threads: List of thread metadata dicts
         current_thread_id: ID of currently active thread
+        session_state: Current session state
+        prompt_session: Main PromptSession for unified Application lifecycle
 
     Returns:
         Tuple of (thread_id, action) or (None, None) if cancelled
     """
-    rich_prompt = RichPrompt(console)
+    import asyncio
 
-    # Build choices with formatted display
-    choices = []
-    for thread in threads:
-        summary = _format_thread_summary(thread, current_thread_id)
-        choices.append((thread["id"], summary))
+    try:
+        rich_prompt = RichPrompt(console, session_state, prompt_session)
 
-    # Step 1: Select thread
-    instruction = (
-        "(Type number and press Enter • Ctrl+C to cancel)"
-        if len(threads) <= 10
-        else "(Type number to select • Ctrl+C to cancel)"
-    )
+        # Create thread table for context panel
+        table = create_thread_table(threads, current_thread_id)
 
-    selected_id = await rich_prompt.select_async(
-        question="Select a thread:",
-        choices=choices,
-        default=current_thread_id,
-    )
+        # Check server availability and add warning if offline
+        server_available = check_server_availability()
+        if not server_available:
+            from rich.console import Group
+            from rich.text import Text
 
-    if not selected_id:
-        return None, None
+            warning = Text()
+            warning.append("⚠  ", style="yellow bold")
+            warning.append("LangGraph server offline", style="yellow")
+            warning.append(" – showing local metadata only\n", style="dim")
+            warning.append(
+                "   Previews and metrics may be stale. Start server with: ",
+                style="dim",
+            )
+            warning.append("langgraph dev", style="cyan")
 
-    # Step 2: Select action
-    thread = next((t for t in threads if t["id"] == selected_id), None)
-    if not thread:
-        return None, None
+            table_with_warning = Group(warning, table)
+            table_panel = Panel(
+                table_with_warning,
+                title=f"[bold {Colors.PRIMARY}]Thread Management[/bold {Colors.PRIMARY}]",
+                border_style=Colors.PRIMARY,
+                padding=(0, 1),
+            )
+        else:
+            table_panel = Panel(
+                table,
+                title=f"[bold {Colors.PRIMARY}]Thread Management[/bold {Colors.PRIMARY}]",
+                border_style=Colors.PRIMARY,
+                padding=(0, 1),
+            )
 
-    thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
-    short_id = selected_id[:8]
+        # Build choices with formatted display
+        choices = []
+        for thread in threads:
+            summary = format_thread_summary(thread, current_thread_id)
+            choices.append((thread["id"], summary))
 
-    console.print()
-    console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
-    console.print()
+        selected_id = await rich_prompt.select_async(
+            question="Select a thread:",
+            choices=choices,
+            default=current_thread_id,
+            context_panel=table_panel,
+        )
 
-    action_choices = [
-        ("switch", "↻  Switch to this thread"),
-        ("delete", "✕  Delete this thread"),
-        ("rename", "✎  Rename this thread"),
-        ("cancel", "←  Cancel"),
-    ]
+        if not selected_id:
+            return None, None
 
-    action = await rich_prompt.select_async(
-        question="Choose an action:",
-        choices=action_choices,
-    )
+        # Step 2: Select action
+        thread = next((t for t in threads if t["id"] == selected_id), None)
+        if not thread:
+            return None, None
 
-    if not action or action == "cancel":
+        thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+        short_id = selected_id[:8]
+
         console.print()
-        return None, None
+        console.print(f"[{COLORS['primary']}]✓ Selected: {escape(thread_name)} ({short_id})[/]")
+        console.print()
 
-    return selected_id, action
+        action_choices = [
+            ("switch", "[Switch] Change to this thread"),
+            ("delete", "[Delete] Remove this thread"),
+            ("rename", "[Rename] Update thread name"),
+            ("cancel", "[Cancel] Return without changes"),
+        ]
+
+        action = await rich_prompt.select_async(
+            question="Choose an action:",
+            choices=action_choices,
+        )
+
+        if not action or action == "cancel":
+            console.print()
+            return None, None
+
+        return selected_id, action
+
+    except asyncio.CancelledError:
+        # Task cancelled - perform cleanup and propagate cancellation
+        raise
+    finally:
+        # Guaranteed cleanup (currently no resources to clean up, but pattern consistency)
+        pass
 
 
-async def _confirm_thread_deletion(thread: dict) -> bool:
+async def _confirm_thread_deletion(thread: dict, session_state, prompt_session) -> bool:
     """Show confirmation dialog for thread deletion.
 
     Args:
         thread: Thread metadata dict
+        session_state: Current session state
+        prompt_session: Main PromptSession for unified Application lifecycle
 
     Returns:
         True if user confirmed deletion, False otherwise
     """
-    rich_prompt = RichPrompt(console)
+    rich_prompt = RichPrompt(console, session_state, prompt_session)
 
     thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
@@ -394,23 +358,32 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
 
 
 async def _select_thread_interactively(
-    threads, current_thread_id: str | None
+    threads, current_thread_id: str | None, session_state, prompt_session
 ) -> tuple[str, str] | tuple[None, None]:
     """Present an interactive picker to choose a thread and action.
 
-    Returns tuple of (thread_id, action) where action is 'switch', 'delete', or 'rename'.
-    Returns (None, None) if selection was cancelled.
+    Args:
+        threads: List of thread metadata dicts
+        current_thread_id: ID of currently active thread
+        session_state: Current session state
+        prompt_session: Main PromptSession for unified Application lifecycle
+
+    Returns:
+        Tuple of (thread_id, action) where action is 'switch', 'delete', or 'rename'.
+        Returns (None, None) if selection was cancelled.
     """
     if not threads:
         return None, None
 
-    return await _select_thread_with_rich(threads, current_thread_id)
+    return await _select_thread_with_rich(threads, current_thread_id, session_state, prompt_session)
 
 
 # Removed _select_thread_fallback - no longer needed after questionary migration
 
 
-async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool:
+async def handle_thread_commands_async(
+    args: str, thread_manager, agent, session_state, prompt_session
+) -> bool:
     """Handle /threads subcommands (async version)."""
     args = args.strip()
 
@@ -424,8 +397,11 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
             console.print()
             return True
 
-        # Phase 1: Enrich with server data (sync, blocking)
-        enriched_threads = [_enrich_thread_with_server_data(t) for t in threads]
+        # Phase 1: Check server availability and enrich with server data (sync, blocking)
+        server_available = check_server_availability()
+        enriched_threads = [
+            enrich_thread_with_server_data(t, server_available=server_available) for t in threads
+        ]
 
         # Phase 2: Enrich with LangSmith metrics (async, concurrent)
         langsmith_client = get_langsmith_client()
@@ -439,7 +415,9 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
         console.print()
         try:
-            target_id, action = await _select_thread_interactively(enriched_threads, current_id)
+            target_id, action = await _select_thread_interactively(
+                enriched_threads, current_id, session_state, prompt_session
+            )
         except KeyboardInterrupt:
             console.print("\n[red]Thread selection interrupted.[/red]")
             console.print()
@@ -479,7 +457,7 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
 
         elif action == "delete":
             # Confirm deletion
-            if not await _confirm_thread_deletion(thread):
+            if not await _confirm_thread_deletion(thread, session_state, prompt_session):
                 return True
 
             # Perform deletion
@@ -495,7 +473,7 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
                 console.print()
 
         elif action == "rename":
-            rich_prompt = RichPrompt(console)
+            rich_prompt = RichPrompt(console, session_state, prompt_session)
 
             # Validator function
             def validate_name(text: str) -> bool | str:
@@ -538,7 +516,7 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
     return True
 
 
-async def handle_handoff_command(args: str, agent, session_state) -> bool:
+async def handle_handoff_command(args: str, agent, session_state, prompt_session=None) -> bool:
     """Handle /handoff command via tool invocation.
 
     Args:
@@ -582,6 +560,7 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
         assistant_id=assistant_id,
         session_state=session_state,
         token_tracker=None,
+        prompt_session=prompt_session,
     )
 
     # The execution loop handles approval UI and persistence when it detects handoff_approval_pending
@@ -589,17 +568,34 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
 
 
 async def handle_command(
-    command: str, agent, token_tracker: TokenTracker, session_state=None
+    command: str,
+    agent,
+    token_tracker: TokenTracker,
+    session_state=None,
+    prompt_session=None,
 ) -> str | bool:
-    """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
+    """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent.
+
+    Args:
+        command: The slash command string
+        agent: The compiled agent instance
+        token_tracker: Token usage tracker
+        session_state: Session state object
+        prompt_session: Main PromptSession for unified Application lifecycle (required for /menu)
+    """
     command = command.strip()
     if not command:
         return False
 
     # Extract command and args
-    parts = command.strip().lstrip("/").split(maxsplit=1)
-    base_cmd = parts[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
+    stripped = command.strip().lstrip("/")
+    if not stripped:
+        base_cmd = ""
+        args = ""
+    else:
+        parts = stripped.split(maxsplit=1)
+        base_cmd = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
 
     if base_cmd in ["quit", "exit", "q"]:
         return "exit"
@@ -638,7 +634,7 @@ async def handle_command(
 
         return True
 
-    if base_cmd == "menu" or base_cmd == "m":
+    if base_cmd in {"", "menu", "m"}:
         # Open main menu
         if not session_state:
             console.print()
@@ -648,10 +644,9 @@ async def handle_command(
 
         from .cement_menu_system import CementMenuSystem
 
-        menu_system = CementMenuSystem(session_state, token_tracker)
-        # Run blocking menu call in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, menu_system.show_main_menu)
+        # Pass prompt_session to avoid nested Application anti-pattern
+        menu_system = CementMenuSystem(session_state, token_tracker, agent, prompt_session)
+        result = await menu_system.show_main_menu()
         if result == "exit":
             return "exit"
         return True
@@ -692,10 +687,12 @@ async def handle_command(
             console.print()
             return True
 
-        return await handle_thread_commands_async(args, session_state.thread_manager, agent)
+        return await handle_thread_commands_async(
+            args, session_state.thread_manager, agent, session_state, prompt_session
+        )
 
     if base_cmd == "handoff":
-        return await handle_handoff_command(args, agent, session_state)
+        return await handle_handoff_command(args, agent, session_state, prompt_session)
 
     console.print()
     console.print(f"[yellow]Unknown command: /{base_cmd}[/yellow]")
@@ -713,7 +710,7 @@ def execute_bash_command(command: str) -> bool:
 
     try:
         console.print()
-        console.print(f"[dim]$ {cmd}[/dim]")
+        console.print(f"$ {cmd}", style=COLORS["dim"], markup=False)
 
         # Execute the command
         result = subprocess.run(
@@ -724,7 +721,7 @@ def execute_bash_command(command: str) -> bool:
         if result.stdout:
             console.print(result.stdout, style=COLORS["dim"], markup=False)
         if result.stderr:
-            console.print(result.stderr, style="red", markup=False)
+            console.print(result.stderr, style=Colors.ERROR, markup=False)
 
         # Show return code if non-zero
         if result.returncode != 0:
@@ -738,6 +735,5 @@ def execute_bash_command(command: str) -> bool:
         console.print()
         return True
     except Exception as e:
-        console.print(f"[red]Error executing command: {e}[/red]")
-        console.print()
+        handle_error(e, context="bash command execution", fatal=False)
         return True

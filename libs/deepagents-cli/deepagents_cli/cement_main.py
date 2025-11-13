@@ -9,10 +9,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 
 from .cement_interactive import start_interactive_mode
-from .config import SessionState, console
+from .config import SessionState, console, handle_error
 
 
 def cement_main() -> None:
@@ -57,15 +56,17 @@ def cement_main() -> None:
     # Handle non-interactive commands
     if args.command == "list":
         from .agent import list_agents
+
         list_agents()
         return
 
-    elif args.command == "reset":
+    if args.command == "reset":
         from .agent import reset_agent
+
         reset_agent(args.agent, args.target)
         return
 
-    elif args.command == "help":
+    if args.command == "help":
         parser.print_help()
         return
 
@@ -78,8 +79,7 @@ def cement_main() -> None:
         console.print("\n[cyan]Goodbye! Happy coding! 👋[/cyan]", style="bold")
         sys.exit(0)
     except Exception as e:
-        console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
-        raise
+        handle_error(e, context="CLI startup", fatal=True, show_traceback=True)
 
 
 if __name__ == "__main__":

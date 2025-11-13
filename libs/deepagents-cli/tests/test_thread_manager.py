@@ -126,7 +126,9 @@ def test_reconcile_preserves_recent_metadata(mock_fork, mock_create, tmp_path):
 def test_delete_thread_falls_back_when_server_unreachable(
     mock_fork, mock_create, mock_delete, tmp_path
 ):
-    mock_create.side_effect = ["default-thread", "to-delete"]
+    default_thread_id = str(uuid.uuid4())
+    to_delete_id = str(uuid.uuid4())
+    mock_create.side_effect = [default_thread_id, to_delete_id]
     mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
 
     def offline_delete(*_, **__):
@@ -162,7 +164,9 @@ def test_delete_thread_falls_back_when_server_unreachable(
 @patch("deepagents_cli.server_client.create_thread_on_server")
 @patch("deepagents_cli.server_client.fork_thread_on_server")
 def test_delete_thread_raises_on_server_error(mock_fork, mock_create, mock_delete, tmp_path):
-    mock_create.side_effect = ["default-thread", "to-delete"]
+    default_thread_id = str(uuid.uuid4())
+    to_delete_id = str(uuid.uuid4())
+    mock_create.side_effect = [default_thread_id, to_delete_id]
     mock_fork.side_effect = lambda thread_id=None, **kwargs: str(uuid.uuid4())
 
     def http_error(*_, **__):

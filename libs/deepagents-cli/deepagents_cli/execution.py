@@ -12,7 +12,7 @@ from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .config import COLORS, console
+from .config import COLORS, console, handle_error
 from .file_ops import FileOpTracker, build_approval_preview
 from .input import parse_file_mentions
 from .rich_ui import RichPrompt
@@ -25,6 +25,7 @@ from .ui import (
     render_file_operation,
     render_todo_list,
 )
+from .ui_constants import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,19 @@ def _extract_tool_args(action_request: dict) -> dict | None:
     return None
 
 
-async def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
+async def prompt_for_tool_approval(
+    action_request: dict, assistant_id: str | None, session_state, prompt_session
+) -> dict:
     """Prompt user to approve/reject a tool action with Rich prompts.
+
+    Args:
+        action_request: The tool action request from LangGraph
+        assistant_id: Assistant identifier for previewing operations
+        session_state: Session state with auto_approve flag
+        prompt_session: Main PromptSession for unified Application lifecycle
+
+    Returns:
+        Decision dict with type 'approve' or 'reject'
 
     NOTE: This function is async to support async prompt workflows.
     Callers must await this function.
@@ -94,9 +106,9 @@ async def prompt_for_tool_approval(action_request: dict, assistant_id: str | Non
     # Display action info first
     console.print(
         Panel(
-            "[bold yellow]⚠️  Tool Action Requires Approval[/bold yellow]\n\n"
+            f"[bold {Colors.WARNING}]WARNING: Tool action requires approval.[/bold {Colors.WARNING}]\n\n"
             + "\n".join(body_lines),
-            border_style="yellow",
+            border_style=Colors.WARNING,
             box=box.ROUNDED,
             padding=(0, 1),
         )
@@ -106,17 +118,18 @@ async def prompt_for_tool_approval(action_request: dict, assistant_id: str | Non
         render_diff_block(preview.diff, preview.diff_title or preview.title)
 
     # Use Rich prompts for approval
-    rich_prompt = RichPrompt(console)
+    rich_prompt = RichPrompt(console, session_state, prompt_session)
 
     console.print()
     try:
         decision = await rich_prompt.select_async(
             question="Choose an action:",
             choices=[
-                ("approve", "✓  Approve (allow this tool to run)"),
-                ("reject", "✕  Reject (block this tool)"),
+                ("approve", "[Approve] Allow this tool to run"),
+                ("reject", "[Reject] Block this tool"),
             ],
-            default="approve",
+            default=None,  # Display placeholder text
+            require_explicit_choice=True,
         )
     except (KeyboardInterrupt, EOFError):
         decision = None
@@ -140,6 +153,7 @@ async def execute_task(
     assistant_id: str | None,
     session_state,
     token_tracker: TokenTracker | None = None,
+    prompt_session=None,
 ) -> None:
     """Execute task with generic interrupt handling (no handoff-specific params)."""
     # Parse file mentions and inject content if any
@@ -375,7 +389,7 @@ async def execute_task(
                                     status.stop()
                                     spinner_active = False
                                 console.print()
-                                console.print(tool_content, style="red", markup=False)
+                                console.print(tool_content, style=Colors.ERROR, markup=False)
                                 console.print()
                         elif tool_content and isinstance(tool_content, str):
                             stripped = tool_content.lstrip()
@@ -385,7 +399,7 @@ async def execute_task(
                                     status.stop()
                                     spinner_active = False
                                 console.print()
-                                console.print(tool_content, style="red", markup=False)
+                                console.print(tool_content, style=Colors.ERROR, markup=False)
                                 console.print()
 
                         if record:
@@ -568,6 +582,8 @@ async def execute_task(
                     decision_result = await prompt_handoff_decision(
                         proposal,
                         preview_only=False,
+                        session_state=session_state,
+                        prompt_session=prompt_session,
                     )
 
                     # Build resume data in format HandoffApprovalMiddleware expects
@@ -679,6 +695,8 @@ async def execute_task(
                             decision = await prompt_for_tool_approval(
                                 action_request,
                                 assistant_id,
+                                session_state,
+                                prompt_session,
                             )
                             decisions.append(decision)
 
@@ -730,7 +748,7 @@ async def execute_task(
             )
             console.print("Ready for next command.\n", style="dim")
         except Exception as e:
-            console.print(f"[red]Warning: Failed to update agent state: {e}[/red]\n")
+            handle_error(e, context="agent state update", fatal=False, log_level="warning")
 
         return
 
@@ -753,7 +771,7 @@ async def execute_task(
             )
             console.print("Ready for next command.\n", style="dim")
         except Exception as e:
-            console.print(f"[red]Warning: Failed to update agent state: {e}[/red]\n")
+            handle_error(e, context="agent state update", fatal=False, log_level="warning")
 
         return
 

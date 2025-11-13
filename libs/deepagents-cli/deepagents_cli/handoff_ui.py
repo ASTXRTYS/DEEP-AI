@@ -9,8 +9,9 @@ from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .config import console
+from .config import SessionState, console
 from .rich_ui import RichPrompt
+from .ui_constants import Colors
 
 
 @dataclass
@@ -38,6 +39,8 @@ async def prompt_handoff_decision(
     proposal: HandoffProposal,
     *,
     preview_only: bool = False,
+    session_state: SessionState | None = None,
+    prompt_session=None,
 ) -> HandoffDecision:
     """Render the proposal and capture the user's decision.
 
@@ -47,6 +50,8 @@ async def prompt_handoff_decision(
     Args:
         proposal: The handoff summary to review
         preview_only: If True, skip decision prompt (for testing)
+        session_state: Session state with auto_approve setting
+        prompt_session: Main PromptSession for unified Application lifecycle
 
     Returns:
         HandoffDecision with type="approve", "refine", or "reject"
@@ -54,9 +59,9 @@ async def prompt_handoff_decision(
     console.print()
     console.print(
         Panel(
-            "[bold yellow]⚠️  Thread Handoff Requires Approval[/bold yellow]\n\n"
+            f"[bold {Colors.WARNING}]WARNING: Thread handoff requires approval.[/bold {Colors.WARNING}]\n\n"
             + Markdown(proposal.summary_md).markup,
-            border_style="yellow",
+            border_style=Colors.WARNING,
             box=box.ROUNDED,
             padding=(0, 1),
         )
@@ -72,18 +77,19 @@ async def prompt_handoff_decision(
         )
 
     # Use Rich prompts for selection
-    rich_prompt = RichPrompt(console)
+    rich_prompt = RichPrompt(console, session_state, prompt_session)
 
     console.print()
     try:
         decision = await rich_prompt.select_async(
             question="Review the handoff summary and choose an action:",
             choices=[
-                ("approve", "✓  Approve (proceed with handoff)"),
-                ("refine", "⟲  Refine (regenerate with feedback)"),
-                ("decline", "✕  Decline (cancel handoff)"),
+                ("approve", "[Approve] Proceed with this handoff"),
+                ("refine", "[Refine] Regenerate with feedback"),
+                ("reject", "[Decline] Cancel the handoff"),
             ],
-            default="approve",
+            default=None,  # Display placeholder text
+            require_explicit_choice=True,
         )
     except (KeyboardInterrupt, EOFError):
         console.print()

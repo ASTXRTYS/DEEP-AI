@@ -15,12 +15,14 @@ import requests
 
 from .config import SERVER_REQUEST_TIMEOUT
 
+
 _STARTED_SERVER_PROCESS: subprocess.Popen[bytes] | None = None
 _CLEANUP_REGISTERED = False
 
 
 def _register_server_cleanup(process: subprocess.Popen[bytes]) -> None:
     """Register an atexit handler to terminate the spawned dev server."""
+
     global _STARTED_SERVER_PROCESS, _CLEANUP_REGISTERED
     _STARTED_SERVER_PROCESS = process
 
@@ -31,6 +33,7 @@ def _register_server_cleanup(process: subprocess.Popen[bytes]) -> None:
 
 def _cleanup_started_server() -> None:
     """Terminate the LangGraph dev server started by the CLI."""
+
     global _STARTED_SERVER_PROCESS
 
     process = _STARTED_SERVER_PROCESS
@@ -62,6 +65,7 @@ def _request(
     json: Any | None = None,
 ) -> requests.Response:
     """Internal helper for LangGraph requests with consistent handling."""
+
     url = f"{server_url or get_server_url()}{path}"
     timeout = timeout or SERVER_REQUEST_TIMEOUT
 
@@ -227,38 +231,6 @@ def fork_thread_on_server(thread_id: str, server_url: str | None = None) -> str:
     return response.json()["thread_id"]
 
 
-def delete_thread_on_server(thread_id: str, server_url: str | None = None) -> None:
-    """Delete a thread on LangGraph server.
-
-    Deletes the thread and all associated checkpoints via the server API.
-    Deletion cascades automatically on the server side.
-
-    If the thread doesn't exist (404), this is treated as success since the
-    desired end state (thread not existing) is achieved.
-
-    Args:
-        thread_id: Thread ID to delete
-        server_url: Optional server URL, defaults to get_server_url()
-
-    Raises:
-        LangGraphError: If server request fails or times out (except 404)
-    """
-    url = f"{server_url or get_server_url()}/threads/{thread_id}"
-    timeout = SERVER_REQUEST_TIMEOUT
-
-    try:
-        response = requests.delete(url, timeout=timeout)
-        # 204 No Content = success
-        # 404 Not Found = thread doesn't exist, which is the desired state
-        if response.status_code in (204, 404):
-            return
-        response.raise_for_status()
-    except requests.Timeout as exc:
-        raise LangGraphTimeoutError(f"Timed out talking to LangGraph at {url}") from exc
-    except requests.RequestException as exc:  # pragma: no cover - network errors
-        raise LangGraphRequestError(str(exc)) from exc
-
-
 def start_server_if_needed() -> tuple[bool, str | None]:
     """Start LangGraph dev server if not already running.
 
@@ -283,7 +255,7 @@ def start_server_if_needed() -> tuple[bool, str | None]:
     try:
         log_file = tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log")
 
-        process = subprocess.Popen(
+        process = subprocess.Popen(  # noqa: S603
             ["langgraph", "dev"],
             stdout=log_file,
             stderr=subprocess.STDOUT,

@@ -205,3 +205,58 @@ deepagents = "deepagents.cli:cli_main"
 ```
 
 This means when users install the package, they can run `deepagents` directly.
+
+## Handoff architecture
+
+The CLI supports two complementary handoff flows that **share the same helpers** but have
+different entry points:
+
+- **Manual handoff (`/handoff`) – CLI-owned**
+  - Implemented in `deepagents_cli.commands.handle_handoff_command`.
+  - Flow:
+    - Reads the current thread's conversation history via `agent.aget_state`.
+    - Uses `select_messages_for_summary` and a small windowing helper to pick recent
+      messages.
+    - Calls `generate_handoff_summary` to produce a `HandoffSummary`.
+    - Presents the summary in the terminal via `handoff_ui.prompt_handoff_decision`.
+    - On acceptance, calls `apply_handoff_acceptance` to:
+      - Persist the `<current_thread_summary>` block into `agent.md`.
+      - Create a child thread wired to the parent via `metadata["handoff"]`.
+      - Switch the CLI to the new child thread.
+    - Preview and decline modes short-circuit without touching disk or threads.
+
+- **Agent-initiated handoff – middleware + HITL**
+  - The agent can call the `request_handoff` tool provided by
+    `HandoffToolMiddleware`. This sets a `handoff_requested` flag in state.
+  - `HandoffSummarizationMiddleware.after_model` detects this flag and:
+    - Calls `generate_handoff_summary` to build a `HandoffSummary`.
+    - Wraps it into a canonical HITL payload (`HandoffActionArgs`, `ActionRequest`,
+      `ReviewConfig`) and calls `langgraph.types.interrupt`.
+  - The CLI's `execute_task` loop receives the interrupt and:
+    - Detects handoff payloads via `is_handoff_request` and `_resolve_handoff_action`.
+    - Renders the markdown preview and inline edit UI via `prompt_handoff_decision`.
+    - Normalizes the user's decision into a HITL `decisions` list
+      (`approve`/`reject`/`edit`/`preview`) and resumes the graph with
+      `Command(resume=...)`.
+  - `HandoffSummarizationMiddleware` then normalizes the resume payload into
+    `handoff_decision` and `handoff_approved` state entries for downstream
+    observers (graph nodes, analytics, etc.).
+
+- **Cleanup and metadata**
+  - `apply_handoff_acceptance` is the **single source of truth** for:
+    - Writing the summary block into `agent.md`.
+    - Creating the child thread and wiring the parent/child via
+      `HandoffMetadata` in `metadata["handoff"]`.
+  - `HandoffCleanupMiddleware.after_agent` runs in the child thread and, on the
+    first response, emits `_handoff_cleanup_pending` / `_handoff_cleanup_done`.
+  - After each interaction the CLI checks the final agent state; if
+    `_handoff_cleanup_pending` is set it:
+    - Calls `clear_summary_block_file` on `agent.md`.
+    - Updates `metadata["handoff"]` to set `pending=False`,
+      `cleanup_required=False`, and `last_cleanup_at`.
+
+This division of responsibilities keeps:
+
+- manual `/handoff` UX **in the CLI**,
+- summarization + human-in-the-loop review **in one middleware + interrupt**, and
+- persistence/cleanup **centralized in `handoff_persistence` + cleanup middleware**.

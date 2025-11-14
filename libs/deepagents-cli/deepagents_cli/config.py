@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import dotenv
 from rich.console import Console
@@ -42,12 +43,13 @@ DEEP_AGENTS_ASCII = """
 COMMANDS = {
     "menu": "Open main menu (also: Ctrl+M)",
     "help": "Show help and available commands",
-    "new [name]": "Create a new thread",
+    "new": "Create a new thread (/new [name])",
     "threads": "Switch threads (interactive)",
     "handoff": "Summarize current thread and start a child",
     "tokens": "Show token usage statistics",
     "clear": "Clear screen",
-    "quit": "Exit",
+    "quit": "Exit (also: /exit)",
+    "exit": "Exit the CLI",
 }
 
 
@@ -78,12 +80,14 @@ USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in 
 class SessionState:
     """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False, thread_manager=None) -> None:
+    def __init__(self, auto_approve: bool = False, thread_manager: Any | None = None) -> None:
         self.auto_approve = auto_approve
         self.thread_manager = thread_manager
         self.model = None
         self.pending_handoff_child_id: str | None = None  # Deferred handoff target
         self.menu_requested: bool = False  # Flag for Ctrl+M menu trigger
+        self.exit_hint_until: float | None = None
+        self.exit_hint_handle = None
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""
@@ -120,7 +124,6 @@ def create_model():
         console.print(f"[dim]Using OpenAI model: {model_name}[/dim]")
         return ChatOpenAI(
             model=model_name,
-            temperature=0.7,
         )
     if anthropic_key:
         from langchain_anthropic import ChatAnthropic

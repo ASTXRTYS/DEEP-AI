@@ -4,7 +4,7 @@ from pathlib import Path
 
 from langchain_core.messages import SystemMessage
 
-from .config import console
+from deepagents_cli.config import console
 
 
 def calculate_baseline_tokens(model, agent_dir: Path, system_prompt: str) -> int:
@@ -42,23 +42,12 @@ def calculate_baseline_tokens(model, agent_dir: Path, system_prompt: str) -> int
     full_system_prompt = memory_section + "\n\n" + system_prompt + "\n\n" + memory_system_prompt
 
     # Count tokens using the model's official method
-    # Note: Anthropic API requires at least one user message, so we add a minimal one
-    from langchain_core.messages import HumanMessage
-
-    messages = [
-        SystemMessage(content=full_system_prompt),
-        HumanMessage(content="hi"),  # Minimal message to satisfy API requirements
-    ]
+    messages = [SystemMessage(content=full_system_prompt)]
 
     try:
         # Note: tools parameter is not supported by LangChain's token counting
         # Tool tokens will be included in the API response after first message
-        token_count = model.get_num_tokens_from_messages(messages)
-
-        # Subtract the dummy message tokens (~1-2 tokens) to get just the system prompt count
-        dummy_message_tokens = model.get_num_tokens_from_messages([HumanMessage(content="hi")])
-        return token_count - dummy_message_tokens
-
+        return model.get_num_tokens_from_messages(messages)
     except Exception as e:
         # Fallback if token counting fails
         console.print(f"[yellow]Warning: Could not calculate baseline tokens: {e}[/yellow]")

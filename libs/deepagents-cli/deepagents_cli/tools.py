@@ -1,11 +1,40 @@
 """Custom tools for the CLI agent."""
 
+from html.parser import HTMLParser
 import os
 from typing import Any, Literal
 
 import requests
-from langchain_core.tools import tool
 from tavily import TavilyClient
+
+try:  # Optional dependency – fall back to a lightweight HTML stripper if absent
+    from markdownify import markdownify as _markdownify  # type: ignore
+except ImportError:  # pragma: no cover - relies on external optional package
+    _markdownify = None
+
+
+class _PlainTextHTMLStripper(HTMLParser):
+    """Very small HTML→text converter used when markdownify is unavailable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[str] = []
+
+    def handle_data(self, data: str) -> None:  # noqa: D401 - HTMLParser interface
+        self._chunks.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _to_markdown(html: str) -> tuple[str, bool]:
+    if _markdownify is not None:
+        return _markdownify(html), True
+
+    parser = _PlainTextHTMLStripper()
+    parser.feed(html)
+    parser.close()
+    return parser.get_text(), False
 
 # Initialize Tavily client if API key is available
 tavily_client = (
@@ -15,10 +44,6 @@ tavily_client = (
 )
 
 
-@tool(
-    parse_docstring=True,
-    response_format="content_and_artifact",
-)
 def http_request(
     url: str,
     method: str = "GET",
@@ -26,21 +51,11 @@ def http_request(
     data: str | dict | None = None,
     params: dict[str, str] | None = None,
     timeout: int = 30,
-) -> tuple[str, dict[str, Any]]:
-    """Make HTTP requests to REST APIs and JSON endpoints.
-
-    **IMPORTANT**: This tool is for API calls that return JSON data, NOT for:
-    - Web scraping or fetching HTML pages (use web_search instead)
-    - Researching documentation (use web_search instead)
-    - General web browsing (use web_search instead)
-
-    Use this ONLY for programmatic API endpoints like:
-    - REST APIs (e.g., https://api.github.com/repos/...)
-    - JSON endpoints
-    - Webhook calls
+) -> dict[str, Any]:
+    """Make HTTP requests to APIs and web services.
 
     Args:
-        url: Target API endpoint URL
+        url: Target URL
         method: HTTP method (GET, POST, PUT, DELETE, etc.)
         headers: HTTP headers to include
         data: Request body data (string or dict)
@@ -48,9 +63,7 @@ def http_request(
         timeout: Request timeout in seconds
 
     Returns:
-        Tuple of (content, artifact):
-        - content: Concise summary message for the LLM
-        - artifact: Full response dictionary with status, headers, and content
+        Dictionary with response data including status, headers, and content
     """
     try:
         kwargs = {"url": url, "method": method.upper(), "timeout": timeout}
@@ -71,16 +84,8 @@ def http_request(
             content = response.json()
         except:
             content = response.text
-            # Truncate large HTML responses to prevent context overflow
-            # If response is >50KB, it's likely HTML and should use web_search instead
-            if len(content) > 50000:
-                content = (
-                    content[:50000]
-                    + f"\n\n... [Response truncated - {len(content):,} chars total. "
-                    + "NOTE: For web pages and documentation, use web_search tool instead of http_request]"
-                )
 
-        result = {
+        return {
             "success": response.status_code < 400,
             "status_code": response.status_code,
             "headers": dict(response.headers),
@@ -88,56 +93,38 @@ def http_request(
             "url": response.url,
         }
 
-        # Generate concise content for LLM
-        if result["success"]:
-            content_msg = f"✓ HTTP {method.upper()} request to {result['url']} succeeded (status: {result['status_code']})"
-        else:
-            content_msg = f"✗ HTTP {method.upper()} request to {result['url']} failed (status: {result['status_code']})"
-
-        return content_msg, result
-
     except requests.exceptions.Timeout:
-        error_result = {
+        return {
             "success": False,
             "status_code": 0,
             "headers": {},
             "content": f"Request timed out after {timeout} seconds",
             "url": url,
         }
-        error_msg = f"✗ HTTP request to {url} timed out after {timeout}s"
-        return error_msg, error_result
     except requests.exceptions.RequestException as e:
-        error_result = {
+        return {
             "success": False,
             "status_code": 0,
             "headers": {},
             "content": f"Request error: {e!s}",
             "url": url,
         }
-        error_msg = f"✗ HTTP request to {url} failed: {type(e).__name__}"
-        return error_msg, error_result
     except Exception as e:
-        error_result = {
+        return {
             "success": False,
             "status_code": 0,
             "headers": {},
             "content": f"Error making request: {e!s}",
             "url": url,
         }
-        error_msg = f"✗ HTTP request to {url} failed unexpectedly"
-        return error_msg, error_result
 
 
-@tool(
-    parse_docstring=True,
-    response_format="content_and_artifact",
-)
 def web_search(
     query: str,
     max_results: int = 5,
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
-) -> tuple[str, dict]:
+):
     """Search the web using Tavily for current information and documentation.
 
     This tool searches the web and returns relevant results. After receiving results,
@@ -150,11 +137,13 @@ def web_search(
         include_raw_content: Include full page content (warning: uses more tokens)
 
     Returns:
-        Tuple of (content, artifact):
-        - content: Concise summary of search results for the LLM
-        - artifact: Full Tavily response dictionary containing:
-            - results: List of search results with title, url, content, score
-            - query: The original search query
+        Dictionary containing:
+        - results: List of search results, each with:
+            - title: Page title
+            - url: Page URL
+            - content: Relevant excerpt from the page
+            - score: Relevance score (0-1)
+        - query: The original search query
 
     IMPORTANT: After using this tool:
     1. Read through the 'content' field of each result
@@ -164,36 +153,70 @@ def web_search(
     5. NEVER show the raw JSON to the user - always provide a formatted response
     """
     if tavily_client is None:
-        error_result = {
+        return {
             "error": "Tavily API key not configured. Please set TAVILY_API_KEY environment variable.",
             "query": query,
         }
-        error_msg = "✗ Web search unavailable - Tavily API key not configured"
-        return error_msg, error_result
 
     try:
-        search_results = tavily_client.search(
+        return tavily_client.search(
             query,
             max_results=max_results,
             include_raw_content=include_raw_content,
             topic=topic,
         )
-
-        # Generate concise content for LLM
-        num_results = len(search_results.get("results", []))
-        content_msg = f"✓ Found {num_results} web search results for: {query}"
-
-        return content_msg, search_results
     except Exception as e:
-        error_result = {"error": f"Web search error: {e!s}", "query": query}
-        error_msg = f"✗ Web search failed for query: {query}"
-        return error_msg, error_result
+        return {"error": f"Web search error: {e!s}", "query": query}
 
 
-# Configure tools with tags and metadata for LangSmith observability
-http_request.tags = ["external_api", "http", "requires_approval"]
-http_request.metadata = {"workflow": "hitl", "risk_level": "medium", "api_type": "rest"}
+def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
+    """Fetch content from a URL and convert HTML to markdown format.
 
-if tavily_client is not None:
-    web_search.tags = ["external_api", "web_search", "tavily", "requires_approval"]
-    web_search.metadata = {"workflow": "hitl", "risk_level": "low", "api_provider": "tavily"}
+    This tool fetches web page content and converts it to clean markdown text,
+    making it easy to read and process HTML content. After receiving the markdown,
+    you MUST synthesize the information into a natural, helpful response for the user.
+
+    Args:
+        url: The URL to fetch (must be a valid HTTP/HTTPS URL)
+        timeout: Request timeout in seconds (default: 30)
+
+    Returns:
+        Dictionary containing:
+        - success: Whether the request succeeded
+        - url: The final URL after redirects
+        - markdown_content: The page content converted to markdown
+        - status_code: HTTP status code
+        - content_length: Length of the markdown content in characters
+
+    IMPORTANT: After using this tool:
+    1. Read through the markdown content
+    2. Extract relevant information that answers the user's question
+    3. Synthesize this into a clear, natural language response
+    4. NEVER show the raw markdown to the user unless specifically requested
+    """
+    try:
+        response = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DeepAgents/1.0)"},
+        )
+        response.raise_for_status()
+
+        # Convert HTML content to markdown (or plaintext fallback)
+        markdown_content, used_markdownify = _to_markdown(response.text)
+
+        result = {
+            "url": str(response.url),
+            "markdown_content": markdown_content,
+            "status_code": response.status_code,
+            "content_length": len(markdown_content),
+        }
+
+        if not used_markdownify:
+            result[
+                "warning"
+            ] = "markdownify not installed - returned plain text; install optional dependency for richer formatting"
+
+        return result
+    except Exception as e:
+        return {"error": f"Fetch URL error: {e!s}", "url": url}

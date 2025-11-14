@@ -3,20 +3,33 @@
 import asyncio
 import json
 import logging
-from datetime import UTC
-from typing import Any
+import sys
+import termios
+import tty
+from datetime import UTC, datetime
+from typing import Any, TYPE_CHECKING
 
+from langchain.agents.middleware.human_in_the_loop import (
+    ActionRequest,
+    ApproveDecision,
+    Decision,
+    HITLResponse,
+    RejectDecision,
+)
 from langchain_core.messages import HumanMessage, ToolMessage
-from langgraph.types import Command
+from langgraph.types import Command, Interrupt
+from pydantic import TypeAdapter, ValidationError
 from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
+from typing_extensions import NotRequired, TypedDict
 
-from .config import COLORS, console
-from .file_ops import FileOpTracker, build_approval_preview
-from .input import parse_file_mentions
-from .thread_store import ThreadStoreError
-from .ui import (
+from deepagents.middleware.handoff_summarization import HANDOFF_ACTION_NAME
+from deepagents_cli.config import COLORS, console
+from deepagents_cli.file_ops import FileOpTracker, build_approval_preview
+from deepagents_cli.input import parse_file_mentions
+from deepagents_cli.thread_store import ThreadStoreError
+from deepagents_cli.ui import (
     TokenTracker,
     format_tool_display,
     format_tool_message_content,
@@ -25,64 +38,127 @@ from .ui import (
     render_todo_list,
 )
 
+class _FlexibleActionRequest(TypedDict):
+    name: str
+    args: dict[str, Any]
+    description: NotRequired[str]
+
+
+class _FlexibleReviewConfig(TypedDict):
+    action_name: str
+    allowed_decisions: list[str]
+    args_schema: NotRequired[dict[str, Any]]
+
+
+class _FlexibleHITLRequest(TypedDict):
+    action_requests: list[_FlexibleActionRequest]
+    review_configs: list[_FlexibleReviewConfig]
+    metadata: NotRequired[dict[str, Any]]
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from deepagents.middleware.handoff_summarization import HandoffActionArgs
+
+
+_HITL_REQUEST_ADAPTER = TypeAdapter(_FlexibleHITLRequest)
+
+
+def _normalize_hitl_request_payload(payload: Any) -> dict[str, Any]:
+    """Return a plain dict for any validated HITL payload."""
+    if payload is None:
+        return {}
+    if hasattr(payload, "model_dump"):
+        try:
+            normalized = payload.model_dump()
+        except Exception:  # pragma: no cover - defensive guard
+            normalized = None
+    else:
+        normalized = payload
+
+    if isinstance(normalized, dict):
+        return dict(normalized)
+
+    try:
+        return dict(normalized)
+    except Exception:  # pragma: no cover - final fallback
+        return {}
 logger = logging.getLogger(__name__)
 
 
-def _unwrap_interrupt(data: Any) -> dict | None:
-    """Unwrap interrupt payload to extract dict payload.
-
-    LangGraph interrupts can be nested in multiple ways:
-    - As a list: [InterruptObj]
-    - As an object with .value attribute
-    - As a bare dict
-
-    This function safely unwraps to the innermost dict payload.
-
-    Args:
-        data: Raw interrupt data from __interrupt__ field
-
-    Returns:
-        Dict payload if found, None otherwise
-    """
-    # Step 1: Unwrap list/tuple
-    if isinstance(data, (list, tuple)):
-        if not data:
-            return None
-        data = data[0]
-
-    # Step 2: Unwrap .value attribute (may be nested)
-    while hasattr(data, "value") and not isinstance(data, dict):
-        data = data.value
-
-    # Step 3: Validate final payload
-    return data if isinstance(data, dict) else None
+def _coerce_action_args(raw_args: Any) -> dict[str, Any]:
+    """Convert ActionRequest args into a mutable dict."""
+    if raw_args is None:
+        return {}
+    if isinstance(raw_args, dict):
+        return dict(raw_args)
+    if hasattr(raw_args, "model_dump"):
+        try:
+            dumped = raw_args.model_dump()
+        except Exception:  # pragma: no cover - defensive guard
+            return {}
+        if isinstance(dumped, dict):
+            return dict(dumped)
+    return {}
 
 
-def _extract_tool_args(action_request: dict) -> dict | None:
-    """Best-effort extraction of tool call arguments from an action request."""
-    if "tool_call" in action_request and isinstance(action_request["tool_call"], dict):
-        args = action_request["tool_call"].get("args")
-        if isinstance(args, dict):
-            return args
-    args = action_request.get("args")
-    if isinstance(args, dict):
-        return args
-    return None
+def _resolve_handoff_action(
+    hitl_request: dict[str, Any] | None,
+) -> tuple["HandoffActionArgs", dict[str, Any] | None]:
+    """Return canonical :class:`HandoffActionArgs` plus the raw request entry."""
+    if not isinstance(hitl_request, dict):
+        return {}, None
+
+    action_requests = hitl_request.get("action_requests") or []
+    for request in action_requests:
+        if not isinstance(request, dict):
+            continue
+        if request.get("name") != HANDOFF_ACTION_NAME:
+            continue
+        return _coerce_action_args(request.get("args")), request
+
+    # Backwards compatibility: fall back to legacy top-level shape
+    fallback: dict[str, Any] = {}
+    for key in (
+        "handoff_id",
+        "summary_md",
+        "summary_json",
+        "parent_thread_id",
+        "assistant_id",
+        "preview_only",
+    ):
+        value = hitl_request.get(key)
+        if value is not None:
+            fallback[key] = value
+    return fallback, None
 
 
-async def prompt_for_tool_approval(action_request: dict, assistant_id: str | None) -> dict:
-    """Prompt user to approve/reject a tool action with questionary.
+def is_handoff_request(hitl_request: Any) -> bool:
+    if not isinstance(hitl_request, dict):
+        return False
+    if hitl_request.get("action") == HANDOFF_ACTION_NAME:
+        return True
+    action_requests = hitl_request.get("action_requests") or []
+    if any(
+        isinstance(req, dict) and req.get("name") == HANDOFF_ACTION_NAME
+        for req in action_requests
+    ):
+        return True
+    review_configs = hitl_request.get("review_configs") or []
+    return any(
+        isinstance(cfg, dict) and cfg.get("action_name") == HANDOFF_ACTION_NAME
+        for cfg in review_configs
+    )
 
-    NOTE: This function is now async to support questionary's async API.
-    Callers must await this function.
-    """
-    import questionary
-    from questionary import Choice, Style
 
+def prompt_for_tool_approval(
+    action_request: ActionRequest,
+    assistant_id: str | None,
+) -> Decision:
+    """Prompt user to approve/reject a tool action with arrow key navigation."""
     description = action_request.get("description", "No description available")
-    tool_name = action_request.get("name") or action_request.get("tool")
-    tool_args = _extract_tool_args(action_request)
-    preview = build_approval_preview(tool_name, tool_args, assistant_id) if tool_name else None
+    name = action_request["name"]
+    args = action_request["args"]
+    preview = build_approval_preview(name, args, assistant_id) if name else None
 
     body_lines = []
     if preview:
@@ -107,50 +183,92 @@ async def prompt_for_tool_approval(action_request: dict, assistant_id: str | Non
         console.print()
         render_diff_block(preview.diff, preview.diff_title or preview.title)
 
-    # Questionary style for HITL approval
-    approval_style = Style(
-        [
-            ("qmark", "#10b981 bold"),
-            ("question", "bold"),
-            ("answer", "#10b981 bold"),
-            ("pointer", "#10b981 bold"),
-            ("highlighted", "#ffffff bg:#10b981 bold"),  # White on green
-            ("selected", "#10b981"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", "#10b981"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
+    options = ["approve", "reject"]
+    selected = 0  # Start with approve selected
 
-    console.print()
     try:
-        decision = await questionary.select(
-            "Choose an action:",
-            choices=[
-                Choice(title="✓  Approve (allow this tool to run)", value="approve"),
-                Choice(title="✕  Reject (block this tool)", value="reject"),
-            ],
-            default="approve",
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=True,  # Allow 'a' and 'r' shortcuts
-            style=approval_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select, or press a/r)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        console.print("[dim]✓ Approval cancelled - tool rejected.[/dim]")
-        console.print()
-        return {"type": "reject", "message": "User cancelled approval"}
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
 
-    console.print()
-    if decision == "approve":
-        return {"type": "approve"}
-    return {"type": "reject", "message": "User rejected the command"}
+        try:
+            tty.setraw(fd)
+            # Hide cursor during menu interaction
+            sys.stdout.write("\033[?25l")
+            sys.stdout.flush()
+
+            # Initial render flag
+            first_render = True
+
+            while True:
+                if not first_render:
+                    # Move cursor back to start of menu (up 2 lines, then to start of line)
+                    sys.stdout.write("\033[2A\r")
+
+                first_render = False
+
+                # Display options vertically with ANSI color codes
+                for i, option in enumerate(options):
+                    sys.stdout.write("\r\033[K")  # Clear line from cursor to end
+
+                    if i == selected:
+                        if option == "approve":
+                            # Green bold with filled checkbox
+                            sys.stdout.write("\033[1;32m☑ Approve\033[0m\n")
+                        else:
+                            # Red bold with filled checkbox
+                            sys.stdout.write("\033[1;31m☑ Reject\033[0m\n")
+                    elif option == "approve":
+                        # Dim with empty checkbox
+                        sys.stdout.write("\033[2m☐ Approve\033[0m\n")
+                    else:
+                        # Dim with empty checkbox
+                        sys.stdout.write("\033[2m☐ Reject\033[0m\n")
+
+                sys.stdout.flush()
+
+                # Read key
+                char = sys.stdin.read(1)
+
+                if char == "\x1b":  # ESC sequence (arrow keys)
+                    next1 = sys.stdin.read(1)
+                    next2 = sys.stdin.read(1)
+                    if next1 == "[":
+                        if next2 == "B":  # Down arrow
+                            selected = (selected + 1) % len(options)
+                        elif next2 == "A":  # Up arrow
+                            selected = (selected - 1) % len(options)
+                elif char in {"\r", "\n"}:  # Enter
+                    sys.stdout.write("\r\n")  # Move to start of line and add newline
+                    break
+                elif char == "\x03":  # Ctrl+C
+                    sys.stdout.write("\r\n")  # Move to start of line and add newline
+                    raise KeyboardInterrupt
+                elif char.lower() == "a":
+                    selected = 0
+                    sys.stdout.write("\r\n")  # Move to start of line and add newline
+                    break
+                elif char.lower() == "r":
+                    selected = 1
+                    sys.stdout.write("\r\n")  # Move to start of line and add newline
+                    break
+
+        finally:
+            # Show cursor again
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    except (termios.error, AttributeError):
+        # Fallback for non-Unix systems
+        console.print("  ☐ (A)pprove  (default)")
+        console.print("  ☐ (R)eject")
+        choice = input("\nChoice (A/R, default=Approve): ").strip().lower()
+        selected = 1 if choice in {"r", "reject"} else 0
+
+    # Return decision based on selection
+    if selected == 0:
+        return ApproveDecision(type="approve")
+    return RejectDecision(type="reject", message="User rejected the command")
 
 
 async def execute_task(
@@ -159,8 +277,10 @@ async def execute_task(
     assistant_id: str | None,
     session_state,
     token_tracker: TokenTracker | None = None,
-) -> None:
-    """Execute task with generic interrupt handling (no handoff-specific params)."""
+    backend=None,
+    run_metadata: dict[str, Any] | None = None,
+):
+    """Execute any task by passing it directly to the AI agent."""
     # Parse file mentions and inject content if any
     prompt_text, mentioned_files = parse_file_mentions(user_input)
 
@@ -182,41 +302,32 @@ async def execute_task(
     else:
         final_input = prompt_text
 
-    # Use thread manager's current thread ID for dynamic thread switching
     thread_id = assistant_id or "main"
     if session_state and session_state.thread_manager:
         thread_id = session_state.thread_manager.get_current_thread_id()
 
-    # Build configurable section (execution parameters only)
-    config_configurable = {"thread_id": thread_id}
+    config_configurable: dict[str, Any] = {"thread_id": thread_id}
     if assistant_id:
         config_configurable["assistant_id"] = assistant_id
 
     handoff_trace_metadata: dict[str, Any] | None = None
+    metadata_overrides = dict(run_metadata or {})
+    auto_approve = bool(getattr(session_state, "auto_approve", False))
 
     def base_run_metadata() -> dict[str, Any]:
-        """Capture workflow-specific metadata for LangSmith tracing.
-
-        NOTE: thread_id and assistant_id are in configurable, not here.
-        This follows LangGraph best practices - configurable for execution
-        parameters, metadata for observability/tracing context only.
-        """
         metadata: dict[str, Any] = {}
-
         if session_state and session_state.thread_manager:
             try:
                 thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
-            except (ThreadStoreError, OSError, json.JSONDecodeError) as e:
-                # Non-fatal: metadata enrichment is optional for tracing
+            except (ThreadStoreError, OSError, json.JSONDecodeError) as exc:
                 logger.warning(
                     "Failed to retrieve thread metadata for tracing context",
                     exc_info=True,
-                    extra={"thread_id": thread_id, "error_type": type(e).__name__},
+                    extra={"thread_id": thread_id, "error_type": type(exc).__name__},
                 )
                 thread_meta = None
 
             if thread_meta:
-                # Surface thread-level metadata for middleware (e.g., handoff flags)
                 thread_meta_block = dict(thread_meta.get("metadata") or {})
                 if thread_meta_block:
                     metadata["thread_metadata"] = thread_meta_block
@@ -225,23 +336,23 @@ async def execute_task(
                         metadata["handoff"] = handoff_block
                 if name := thread_meta.get("name"):
                     metadata["thread_name"] = name
-
         return metadata
 
     def build_run_config(*, with_trace_metadata: bool = True) -> dict[str, Any]:
-        """Compose per-run config for graph execution.
-
-        Returns RunnableConfig with:
-        - configurable: Execution parameters (thread_id, assistant_id)
-        - metadata: Workflow-specific tracing context (handoff state, etc.)
-        """
         metadata = base_run_metadata()
+        if metadata_overrides:
+            metadata.update(metadata_overrides)
         if with_trace_metadata and handoff_trace_metadata:
             metadata.update(handoff_trace_metadata)
         return {
             "configurable": config_configurable,
             "metadata": metadata,
         }
+
+    def serialize_decision(decision: Decision | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(decision, dict):
+            return decision
+        return decision.model_dump()
 
     has_responded = False
     captured_input_tokens = 0
@@ -260,13 +371,14 @@ async def execute_task(
         "glob": "🔍",
         "grep": "🔎",
         "shell": "⚡",
+        "execute": "🔧",
         "web_search": "🌐",
         "http_request": "🌍",
         "task": "🤖",
         "write_todos": "📋",
     }
 
-    file_op_tracker = FileOpTracker(assistant_id=assistant_id)
+    file_op_tracker = FileOpTracker(assistant_id=assistant_id, backend=backend)
 
     # Track which tool calls we've displayed to avoid duplicates
     displayed_tool_ids = set()
@@ -290,27 +402,22 @@ async def execute_task(
         console.print(markdown, style=COLORS["agent"])
         pending_text = ""
 
-    # Handoff requests now flow through agent middlewares via interrupts.
-    # We still set the config flags above; middlewares will emit an interrupt
-    # which the streaming loop handles. We intentionally avoid any synchronous
-    # summary generation here to ensure proper tracing and UX.
-
     # Stream input - may need to loop if there are interrupts
     stream_input = {"messages": [{"role": "user", "content": final_input}]}
 
     try:
         while True:
-            current_config = build_run_config()
             interrupt_occurred = False
-            hitl_response = None
+            hitl_response: dict[str, HITLResponse] = {}
             suppress_resumed_output = False
-            hitl_request = None
+            # Track all pending interrupts: {interrupt_id: request_data}
+            pending_interrupts: dict[str, dict[str, Any]] = {}
 
             async for chunk in agent.astream(
                 stream_input,
                 stream_mode=["messages", "updates"],  # Dual-mode for HITL support
                 subgraphs=True,
-                config=current_config,
+                config=build_run_config(),
                 durability="exit",
             ):
                 # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
@@ -324,21 +431,30 @@ async def execute_task(
                     if not isinstance(data, dict):
                         continue
 
-                    # Check for interrupts - just capture the data, don't handle yet
+                    # Check for interrupts - collect ALL pending interrupts
                     if "__interrupt__" in data:
-                        interrupt_data = data["__interrupt__"]
-                        hitl_request = _unwrap_interrupt(interrupt_data)
-                        if hitl_request:
-                            interrupt_occurred = True
+                        interrupts: list[Interrupt] = data["__interrupt__"]
+                        if interrupts:
+                            for interrupt_obj in interrupts:
+                                # Interrupt has required fields: value (HITLRequest) and id (str)
+                                # Validate the HITLRequest using TypeAdapter
+                                try:
+                                    validated_request = _HITL_REQUEST_ADAPTER.validate_python(
+                                        interrupt_obj.value
+                                    )
+                                    pending_interrupts[interrupt_obj.id] = (
+                                        _normalize_hitl_request_payload(validated_request)
+                                    )
+                                    interrupt_occurred = True
+                                except ValidationError as e:
+                                    console.print(
+                                        f"[yellow]Warning: Invalid HITL request data: {e}[/yellow]",
+                                        style="dim",
+                                    )
+                                    raise
 
-                    # Extract chunk_data from updates for todo/proposal checking
-                    # Debug: Check all values in data dict for handoff state
+                    # Extract chunk_data from updates for todo checking
                     chunk_data = next(iter(data.values())) if data else None
-
-                    # Also check if handoff state is directly in data (not nested)
-                    if not chunk_data and isinstance(data, dict):
-                        chunk_data = data
-
                     if chunk_data and isinstance(chunk_data, dict):
                         # Check for todo updates
                         if "todos" in chunk_data:
@@ -353,9 +469,6 @@ async def execute_task(
                                 render_todo_list(new_todos)
                                 console.print()
 
-                        # Handoff interrupts are now handled via HandoffApprovalMiddleware.interrupt()
-                        # Detection happens through __interrupt__ field (line 314), not state updates
-
                 # Handle MESSAGES stream - for content and tool calls
                 elif current_stream_mode == "messages":
                     # Messages stream returns (message, metadata) tuples
@@ -365,7 +478,7 @@ async def execute_task(
                     message, metadata = data
 
                     if isinstance(message, HumanMessage):
-                        content = message.text()
+                        content = message.text
                         if content:
                             flush_text_buffer(final=True)
                             if spinner_active:
@@ -386,6 +499,10 @@ async def execute_task(
                         tool_status = getattr(message, "status", "success")
                         tool_content = format_tool_message_content(message.content)
                         record = file_op_tracker.complete_with_message(message)
+
+                        # Reset spinner message after tool completes
+                        if spinner_active:
+                            status.update(f"[bold {COLORS['thinking']}]Agent is thinking...")
 
                         if tool_name == "shell" and tool_status != "success":
                             flush_text_buffer(final=True)
@@ -539,9 +656,10 @@ async def execute_task(
                                 markup=False,
                             )
 
-                            if not spinner_active:
-                                status.start()
-                                spinner_active = True
+                            # Restart spinner with context about which tool is executing
+                            status.update(f"[bold {COLORS['thinking']}]Executing {display_str}...")
+                            status.start()
+                            spinner_active = True
 
                     if getattr(message, "chunk_position", None) == "last":
                         flush_text_buffer(final=True)
@@ -550,132 +668,198 @@ async def execute_task(
             flush_text_buffer(final=True)
 
             # Handle human-in-the-loop after stream completes
-            if interrupt_occurred and hitl_request:
-                handoff_trace_metadata = None
-                # hitl_request is already unwrapped by _unwrap_interrupt()
-                # but double-check it's a valid dict
-                if not isinstance(hitl_request, dict):
-                    hitl_request = None
+            if interrupt_occurred:
+                any_rejected = False
 
-                decisions = []
-                # Check for handoff approval interrupt (from HandoffApprovalMiddleware)
-                if hitl_request and hitl_request.get("action") == "approve_handoff":
-                    # Import handoff UI
-                    from .handoff_ui import HandoffProposal, prompt_handoff_decision
+                for interrupt_id, hitl_request in pending_interrupts.items():
+                    if is_handoff_request(hitl_request):
+                        from deepagents_cli.handoff_ui import HandoffProposal, prompt_handoff_decision
 
-                    payload_metadata = hitl_request.get("metadata")
-                    if isinstance(payload_metadata, dict):
-                        handoff_trace_metadata = payload_metadata.copy()
+                        payload_metadata = hitl_request.get("metadata")
+                        if isinstance(payload_metadata, dict):
+                            handoff_trace_metadata = payload_metadata.copy()
 
-                    if spinner_active:
-                        status.stop()
-                        spinner_active = False
+                        if spinner_active:
+                            status.stop()
+                            spinner_active = False
 
-                    # Build proposal from interrupt payload
-                    proposal = HandoffProposal(
-                        handoff_id=hitl_request.get("handoff_id", ""),
-                        summary_json=hitl_request.get("summary_json", {}),
-                        summary_md=hitl_request.get(
-                            "summary", ""
-                        ),  # "summary" key in interrupt payload
-                        parent_thread_id=hitl_request.get("parent_thread_id", ""),
-                        assistant_id=hitl_request.get("assistant_id", ""),
-                    )
+                        handoff_args, handoff_request = _resolve_handoff_action(hitl_request)
+                        summary_json = handoff_args.get("summary_json") or hitl_request.get(
+                            "summary_json", {}
+                        )
+                        if not isinstance(summary_json, dict):
+                            summary_json = {}
+                        else:
+                            summary_json = dict(summary_json)
+                        summary_md = (
+                            handoff_args.get("summary_md")
+                            or hitl_request.get("summary")
+                            or hitl_request.get("summary_md")
+                            or ""
+                        )
+                        summary_md = str(summary_md or "")
+                        parent_thread_id = (
+                            handoff_args.get("parent_thread_id")
+                            or hitl_request.get("parent_thread_id")
+                            or thread_id
+                            or ""
+                        )
+                        parent_thread_id = str(parent_thread_id)
+                        assistant_for_request = (
+                            handoff_args.get("assistant_id")
+                            or hitl_request.get("assistant_id")
+                            or assistant_id
+                            or ""
+                        )
+                        assistant_for_request = str(assistant_for_request)
+                        preview_requested = bool(
+                            handoff_args.get("preview_only")
+                            or hitl_request.get("preview_only")
+                            or (payload_metadata or {}).get("handoff", {}).get("preview_only")
+                        )
+                        handoff_id = (
+                            handoff_args.get("handoff_id")
+                            or hitl_request.get("handoff_id")
+                            or ""
+                        )
+                        handoff_id = str(handoff_id)
 
-                    # Get user decision (approve/refine/reject)
-                    # prompt_handoff_decision is now async, so await directly
-                    decision_result = await prompt_handoff_decision(
-                        proposal,
-                        preview_only=False,
-                    )
+                        if not summary_md and summary_json:
+                            from deepagents.middleware.handoff_summarization import (
+                                render_summary_markdown,
+                            )
 
-                    # Build resume data in format HandoffApprovalMiddleware expects
-                    if decision_result.type == "approve":
-                        # User approved - send approval to middleware
-                        decisions.append(
-                            {
-                                "type": "approve",
-                            }
+                            summary_md = render_summary_markdown(
+                                summary_json.get("title", "Handoff Summary"),
+                                summary_json.get("tldr", ""),
+                                summary_json.get("body", []),
+                            )
+
+                        proposal = HandoffProposal(
+                            handoff_id=handoff_id,
+                            summary_json=summary_json,
+                            summary_md=summary_md,
+                            parent_thread_id=parent_thread_id,
+                            assistant_id=str(assistant_for_request),
                         )
 
-                        # Prepare handoff but DON'T switch thread yet
-                        try:
-                            from deepagents.middleware.handoff_summarization import HandoffSummary
+                        # Jason owns CLI handoff UX polish, including preview-mode follow-ups (issues #92/#93).
+                        decision_result = await prompt_handoff_decision(
+                            proposal,
+                            preview_only=preview_requested,
+                        )
 
-                            from deepagents_cli.handoff_persistence import apply_handoff_acceptance
+                        decision_kind = (
+                            getattr(decision_result, "status", None)
+                            or getattr(decision_result, "type", None)
+                            or ""
+                        ).lower()
+                        decision_payload: dict[str, Any] | None = None
 
-                            parent_thread_id = hitl_request.get("parent_thread_id", "")
-                            hsum = HandoffSummary(
-                                handoff_id=hitl_request.get("handoff_id", ""),
-                                summary_json=decision_result.summary_json
-                                or hitl_request.get("summary_json", {}),
-                                summary_md=decision_result.summary_md
-                                or hitl_request.get("summary", ""),
+                        if decision_kind in {"accepted", "accept", "approve", "approved"}:
+                            decision_payload = {"type": "approve"}
+
+                            try:
+                                from deepagents.middleware.handoff_summarization import (
+                                    HandoffSummary,
+                                )
+
+                                from deepagents_cli.handoff_persistence import (
+                                    apply_handoff_acceptance,
+                                )
+
+                                parent_thread_id = parent_thread_id or hitl_request.get(
+                                    "parent_thread_id", ""
+                                )
+                                hsum = HandoffSummary(
+                                    handoff_id=proposal.handoff_id,
+                                    summary_json=decision_result.summary_json
+                                    or summary_json,
+                                    summary_md=decision_result.summary_md or summary_md,
+                                )
+
+                                child_id = apply_handoff_acceptance(
+                                    session_state=session_state,
+                                    summary=hsum,
+                                    summary_md=hsum.summary_md,
+                                    summary_json=hsum.summary_json,
+                                    parent_thread_id=parent_thread_id,
+                                )
+
+                                if session_state:
+                                    session_state.pending_handoff_child_id = child_id
+                                console.print()
+                                console.print("[green]✓ Handoff approved. Processing...[/green]")
+                                console.print()
+                            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                                logger.warning(
+                                    "Failed to persist handoff acceptance",
+                                    extra={
+                                        "error": str(exc),
+                                        "error_type": type(exc).__name__,
+                                        "parent_thread_id": parent_thread_id,
+                                        "handoff_id": proposal.handoff_id,
+                                    },
+                                )
+                        elif decision_kind in {"refine", "edit", "feedback"}:
+                            action_name = (
+                                (handoff_request or {}).get("name")
+                                or hitl_request.get("action")
+                                or HANDOFF_ACTION_NAME
                             )
-
-                            child_id = apply_handoff_acceptance(
-                                session_state=session_state,
-                                summary=hsum,
-                                summary_md=hsum.summary_md,
-                                summary_json=hsum.summary_json,
-                                parent_thread_id=parent_thread_id,
-                            )
-
-                            # Store child_id for deferred switching (AFTER stream completes)
-                            session_state.pending_handoff_child_id = child_id
-                            console.print()
-                            console.print("[green]✓ Handoff approved. Processing...[/green]")
-                            console.print()
-
-                            # Don't return here - must continue to where Command(resume=...)
-                            # is sent to deliver the approval decision to the middleware.
-                            # Thread switching will happen in main.py after execute_task() completes.
-
-                        except (ValueError, OSError, json.JSONDecodeError) as e:
-                            logger.warning(
-                                "Failed to persist handoff acceptance",
-                                extra={
-                                    "error": str(e),
-                                    "error_type": type(e).__name__,
+                            edited_args: dict[str, Any] = dict(handoff_args)
+                            edited_args.update(
+                                {
+                                    "handoff_id": proposal.handoff_id,
                                     "parent_thread_id": parent_thread_id,
-                                    "handoff_id": hitl_request.get("handoff_id", ""),
-                                },
+                                    "summary_json": decision_result.summary_json or summary_json,
+                                    "summary_md": decision_result.summary_md or summary_md,
+                                }
                             )
-                            # Continue - user already approved, middleware has resume decision
-                            # Handoff will still complete via middleware, persistence failure is non-fatal
+                            if assistant_for_request and not edited_args.get("assistant_id"):
+                                edited_args["assistant_id"] = assistant_for_request
+                            feedback = getattr(decision_result, "feedback", None)
+                            if feedback:
+                                edited_args["feedback"] = feedback
 
-                    elif decision_result.type == "refine":
-                        # User wants refinement - send feedback to middleware
-                        # Middleware will regenerate and interrupt again with new summary
-                        decisions.append(
-                            {
-                                "type": "refine",
-                                "feedback": decision_result.feedback or "",
+                            decision_payload = {
+                                "type": "edit",
+                                "edited_action": {
+                                    "name": action_name,
+                                    "args": edited_args,
+                                },
                             }
-                        )
-                        console.print()
-                        console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
-                        console.print()
-
-                    else:  # reject
-                        # User rejected - send rejection to middleware
-                        decisions.append(
-                            {
+                            console.print()
+                            console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
+                            console.print()
+                        elif decision_kind == "preview":
+                            console.print()
+                            console.print(
+                                "[dim]Preview-only review acknowledged. No decision sent; re-run the handoff when ready.[/dim]"
+                            )
+                            console.print()
+                            decision_payload = {"type": "preview"}
+                        else:
+                            decision_payload = {
                                 "type": "reject",
                                 "message": "User declined handoff",
                             }
-                        )
 
-                # Handle other HITL actions (tool approvals) with legacy schema
-                else:
+                        if decision_payload and decision_payload.get("type") == "reject":
+                            any_rejected = True
+
+                        if decision_payload:
+                            hitl_response[interrupt_id] = {"decisions": [decision_payload]}
+
+                        continue
+
                     action_requests = (
                         hitl_request.get("action_requests", []) if hitl_request else []
                     )
+                    decisions: list[Decision | dict[str, Any]] = []
 
-                    for action_request in action_requests:
-                        action_name = action_request.get("name")
-
-                        if session_state.auto_approve:
+                    if auto_approve:
+                        for action_request in action_requests:
                             if spinner_active:
                                 status.stop()
                                 spinner_active = False
@@ -683,35 +867,30 @@ async def execute_task(
                             description = action_request.get("description", "tool action")
                             console.print()
                             console.print(f"  [dim]⚡ {description}[/dim]")
+                            decisions.append(ApproveDecision(type="approve"))
 
-                            decisions.append({"type": "approve"})
+                        if not spinner_active:
+                            status.start()
+                            spinner_active = True
+                    else:
+                        if spinner_active:
+                            status.stop()
+                            spinner_active = False
 
-                            if not spinner_active:
-                                status.start()
-                                spinner_active = True
-                        else:
-                            if spinner_active:
-                                status.stop()
-                                spinner_active = False
-
-                            # prompt_for_tool_approval is now async, so await directly
-                            decision = await prompt_for_tool_approval(
+                        for action_request in action_requests:
+                            decision = prompt_for_tool_approval(
                                 action_request,
                                 assistant_id,
                             )
                             decisions.append(decision)
 
-                # Suppress output if any action was rejected (but NOT for refine - that continues the loop)
-                # For handoff decisions, check "type"; for tool approvals, check "type"
-                suppress_resumed_output = any(d.get("type") == "reject" for d in decisions)
+                    serialized_decisions = [serialize_decision(d) for d in decisions]
+                    if any(decision.get("type") == "reject" for decision in serialized_decisions):
+                        any_rejected = True
 
-                # Format resume data based on what type of interrupt occurred
-                if hitl_request and hitl_request.get("action") == "approve_handoff":
-                    # HandoffApprovalMiddleware expects: {"type": "approve|refine|reject", "feedback": "..."}
-                    hitl_response = decisions[0] if decisions else {"type": "reject"}
-                else:
-                    # Other HITL actions (tool approvals) expect {"decisions": [...]} format
-                    hitl_response = {"decisions": decisions}
+                    hitl_response[interrupt_id] = {"decisions": serialized_decisions}
+
+                suppress_resumed_output = any_rejected
 
             if interrupt_occurred and hitl_response:
                 if suppress_resumed_output:
@@ -728,6 +907,7 @@ async def execute_task(
                 stream_input = Command(resume=hitl_response)
                 # Continue the while loop to restream
             else:
+                # No interrupt, break out of while loop
                 handoff_trace_metadata = None
                 break
 
@@ -785,76 +965,84 @@ async def execute_task(
         if token_tracker and (captured_input_tokens or captured_output_tokens):
             token_tracker.add(captured_input_tokens, captured_output_tokens)
 
-            # Persist token count to thread metadata
             if session_state and session_state.thread_manager and thread_id:
                 try:
                     session_state.thread_manager.update_token_count(
                         thread_id, token_tracker.current_context
                     )
-                except (ValueError, OSError, json.JSONDecodeError) as e:
+                except (ValueError, OSError, json.JSONDecodeError) as exc:
                     logger.debug(
                         "Failed to update token count",
                         extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
                             "thread_id": thread_id,
                         },
                     )
                     # Non-critical - token tracking is for display only via /tokens command
 
-    # Check for handoff cleanup flag and clear summary block if needed
     if session_state and session_state.thread_manager and thread_id:
         try:
-            # Get final state to check for cleanup flag
             final_state = await agent.aget_state(build_run_config(with_trace_metadata=False))
-            if final_state and final_state.values.get("_handoff_cleanup_pending"):
-                # Clear the summary block from agent.md
-                from datetime import datetime
-
-                from deepagents_cli.handoff_persistence import clear_summary_block_file
-
-                agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
-                clear_summary_block_file(agent_md_path)
-
-                # Update thread metadata to mark cleanup as complete
-                # Get existing handoff metadata and update only cleanup fields
-                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
-                if thread_meta and "handoff" in thread_meta.get("metadata", {}):
-                    existing_handoff = thread_meta["metadata"]["handoff"]
-                    updated_handoff = existing_handoff | {
-                        "pending": False,
-                        "cleanup_required": False,
-                        "last_cleanup_at": datetime.now(UTC).isoformat(),
-                    }
-                    session_state.thread_manager.update_thread_metadata(
-                        thread_id,
-                        {"handoff": updated_handoff},
-                    )
-        except (ValueError, OSError, json.JSONDecodeError) as e:
+        except Exception as exc:
             logger.warning(
-                "Failed to clean up handoff state",
+                "Failed to load final agent state",
                 extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
                     "thread_id": thread_id,
-                    "operation": "clear_summary_block_file",
                 },
             )
-            # Non-fatal - stale handoff metadata won't break functionality
-            # Next handoff will overwrite or cleanup will retry on next execution
+            final_state = None
+        else:
+            if final_state and final_state.values.get("_handoff_cleanup_pending"):
+                from deepagents_cli.handoff_persistence import clear_summary_block_file
 
-    # Touch the thread so cleanup/TTL logic sees recent activity
-    if session_state and session_state.thread_manager and thread_id:
+                try:
+                    agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
+                    clear_summary_block_file(agent_md_path)
+
+                    thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
+                    if thread_meta:
+                        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                        existing = dict(
+                            (thread_meta.get("metadata") or {}).get("handoff") or {}
+                        )
+                        updated = existing | {
+                            "pending": False,
+                            "cleanup_required": False,
+                            "last_cleanup_at": timestamp,
+                        }
+                        # Jason is the contact for broader lifecycle follow-ups (issue #91).
+                        session_state.thread_manager.update_thread_metadata(
+                            thread_id,
+                            {"handoff": updated},
+                        )
+                    else:
+                        logger.debug(
+                            "Skipping handoff metadata cleanup; metadata unavailable",
+                            extra={"thread_id": thread_id},
+                        )
+                except (ValueError, OSError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "Failed to clean up handoff state",
+                        extra={
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                            "thread_id": thread_id,
+                            "operation": "clear_summary_block_file",
+                        },
+                    )
+
         try:
             session_state.thread_manager.touch_thread(thread_id, reason="interaction")
-        except (ValueError, OSError, json.JSONDecodeError) as e:
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
             logger.debug(
                 "Failed to touch thread timestamp",
                 extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
                     "thread_id": thread_id,
                     "reason": "interaction",
                 },
             )
-            # Non-critical - TTL tracking is best-effort for cleanup scheduling

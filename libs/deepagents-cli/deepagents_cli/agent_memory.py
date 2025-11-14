@@ -6,7 +6,7 @@ from typing import NotRequired
 
 from deepagents.backends.protocol import BackendProtocol
 from langsmith import traceable
-from langchain_core.callbacks.manager import get_callback_manager_for_config
+from langchain_core.runnables.config import get_callback_manager_for_config
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,

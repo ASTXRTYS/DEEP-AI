@@ -3,18 +3,29 @@
 import asyncio
 import logging
 import os
+import shlex
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Sequence
 
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langsmith import Client
 from requests.exceptions import HTTPError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from deepagents.middleware.handoff_summarization import (
+    MAX_REFINEMENT_ITERATIONS,
+    HandoffSummary,
+    generate_handoff_summary,
+    select_messages_for_summary,
+)
+
 from .config import COLORS, DEEP_AGENTS_ASCII, console
-from .execution import execute_task
+from .handoff_persistence import apply_handoff_acceptance
+from .handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
 
@@ -23,6 +34,10 @@ logger = logging.getLogger(__name__)
 # Simple TTL cache (5 minutes)
 _metrics_cache = {}
 _cache_ttl = 300  # seconds
+
+# Manual /handoff tuning
+HANDOFF_DEFAULT_MESSAGE_LIMIT = 10
+HANDOFF_MAX_MESSAGE_LIMIT = 50
 
 
 def relative_time(iso_timestamp: str) -> str:
@@ -251,205 +266,21 @@ def _enrich_thread_with_server_data(thread: dict) -> dict:
     return thread
 
 
+
 def _format_thread_summary(thread: dict, current_thread_id: str | None) -> str:
     """Build a single-line summary matching LangSmith UI format."""
     display_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
     short_id = thread["id"][:8]
     last_used = relative_time(thread.get("last_used", ""))
 
-    # Get LangSmith metrics
     trace_count = thread.get("trace_count")
     tokens = thread.get("langsmith_tokens", 0)
 
-    # Format trace count (distinguish error from empty)
     if trace_count is None:
-        trace_display = "??"  # Error state
+        trace_display = "??"
     else:
         trace_display = str(trace_count)
 
-    # Format tokens with K/M abbreviations OR comma separators
-    if tokens >= 1_000_000:
-        token_display = f"{tokens / 1_000_000:.1f}M"
-    elif tokens >= 1_000:
-        token_display = f"{tokens / 1_000:.1f}K"
-    else:
-        token_display = f"{tokens:,}"  # Comma separators for <1K
-
-    # Build stats like LangSmith: "12 traces · 34.5K tokens"
-    stats = f"{trace_display} traces · {token_display} tokens"
-
-    current_suffix = " · current" if thread["id"] == current_thread_id else ""
-
-    preview = thread.get("preview")
-    if preview:
-        return f"{short_id}  {display_name}  · {stats}  · {preview}  · {last_used}{current_suffix}"
-    return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
-
-
-async def _select_thread_with_questionary(
-    threads, current_thread_id: str | None
-) -> tuple[str, str] | tuple[None, None]:
-    """Interactive thread picker using questionary with arrow key navigation.
-
-    Args:
-        threads: List of thread metadata dicts
-        current_thread_id: ID of currently active thread
-
-    Returns:
-        Tuple of (thread_id, action) or (None, None) if cancelled
-    """
-    import questionary
-    from questionary import Choice, Style
-
-    # Custom style matching CLI color scheme
-    # Key insight from questionary docs: highlighted needs BACKGROUND color to be visually obvious
-    custom_style = Style(
-        [
-            ("qmark", f"{COLORS['primary']} bold"),
-            ("question", "bold"),
-            ("answer", f"{COLORS['primary']} bold"),
-            ("pointer", f"{COLORS['primary']} bold"),
-            (
-                "highlighted",
-                f"#ffffff bg:{COLORS['primary']} bold",
-            ),  # White text on green background
-            ("selected", f"{COLORS['primary']}"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", f"{COLORS['primary']}"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
-
-    console.print()
-
-    # Build choices with formatted display
-    choices = []
-    default_choice = None
-
-    for thread in threads:
-        summary = _format_thread_summary(thread, current_thread_id)
-        choice = Choice(title=summary, value=thread["id"])
-        choices.append(choice)
-
-        # Mark current thread as default
-        if thread["id"] == current_thread_id:
-            default_choice = choice
-
-    # Step 1: Select thread with search filtering for large lists
-    try:
-        selected_id = await questionary.select(
-            "Select a thread:",
-            choices=choices,
-            default=default_choice,
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=False,
-            use_search_filter=len(threads) > 10,  # Enable search for 10+ threads
-            style=custom_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select, type to search)"
-            if len(threads) > 10
-            else "(↑↓ navigate, Enter select)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        return None, None
-
-    if not selected_id:
-        console.print()
-        return None, None
-
-    # Step 2: Select action
-    thread = next((t for t in threads if t["id"] == selected_id), None)
-    if not thread:
-        return None, None
-
-    thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
-    short_id = selected_id[:8]
-
-    console.print()
-    console.print(f"[{COLORS['primary']}]✓ Selected: {thread_name} ({short_id})[/]")
-    console.print()
-
-    # Action menu style - same background highlighting
-    action_style = Style(
-        [
-            ("qmark", f"{COLORS['primary']} bold"),
-            ("question", "bold"),
-            ("answer", f"{COLORS['primary']} bold"),
-            ("pointer", f"{COLORS['primary']} bold"),
-            ("highlighted", f"#ffffff bg:{COLORS['primary']} bold"),  # Consistent highlighting
-            ("selected", f"{COLORS['primary']}"),
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-            ("search_success", f"{COLORS['primary']}"),  # Successful search results
-            ("search_none", "#888888"),  # No search results message
-            ("separator", "#888888"),  # Separators in lists
-        ]
-    )
-
-    action_choices = [
-        Choice(title="↻  Switch to this thread", value="switch"),
-        Choice(title="✕  Delete this thread", value="delete"),
-        Choice(title="✎  Rename this thread", value="rename"),
-        Choice(title="←  Cancel", value="cancel"),
-    ]
-
-    try:
-        action = await questionary.select(
-            "Choose an action:",
-            choices=action_choices,
-            use_arrow_keys=True,
-            use_indicator=True,
-            use_shortcuts=False,
-            style=action_style,
-            qmark="▶",
-            pointer="●",
-            instruction="(↑↓ navigate, Enter select)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        return None, None
-
-    if not action or action == "cancel":
-        console.print()
-        return None, None
-
-    return selected_id, action
-
-
-async def _confirm_thread_deletion(thread: dict) -> bool:
-    """Show confirmation dialog for thread deletion.
-
-    Args:
-        thread: Thread metadata dict
-
-    Returns:
-        True if user confirmed deletion, False otherwise
-    """
-    import questionary
-    from questionary import Style
-
-    # Warning style for deletion confirmation
-    warning_style = Style(
-        [
-            ("qmark", "#f59e0b bold"),  # Amber/orange for warning
-            ("question", "bold"),
-            ("answer", "#ef4444 bold"),  # Red for destructive action
-            ("instruction", "#888888 italic"),
-            ("text", ""),
-        ]
-    )
-
-    thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
-    short_id = thread["id"][:8]
-    trace_count = thread.get("trace_count", 0)
-    tokens = thread.get("langsmith_tokens", 0)
-
-    # Format token count with K/M abbreviations
     if tokens >= 1_000_000:
         token_display = f"{tokens / 1_000_000:.1f}M"
     elif tokens >= 1_000:
@@ -457,209 +288,267 @@ async def _confirm_thread_deletion(thread: dict) -> bool:
     else:
         token_display = f"{tokens:,}"
 
+    stats = f"{trace_display} traces · {token_display} tokens"
+    current_suffix = " · current" if thread["id"] == current_thread_id else ""
+    preview = thread.get("preview")
+
+    if preview:
+        return f"{short_id}  {display_name}  · {stats}  · {preview}  · {last_used}{current_suffix}"
+    return f"{short_id}  {display_name}  · {stats}  · Last: {last_used}{current_suffix}"
+
+
+def _print_thread_list(threads: list[dict], current_thread_id: str | None) -> None:
+    """Display threads with index numbers for quick switching."""
     console.print()
-    console.print("[yellow]⚠  WARNING: Permanent Deletion[/yellow]")
-    console.print()
-    console.print(f"[bold]Thread:[/bold] {thread_name} [dim]({short_id})[/dim]")
-    console.print()
-    console.print("[dim]This will permanently delete:[/dim]")
-    console.print(f"[dim]  • All conversation history ({trace_count} traces)[/dim]")
-    console.print(f"[dim]  • {token_display} tokens of context[/dim]")
-    console.print("[dim]  • Cannot be undone[/dim]")
-    console.print()
-
-    try:
-        confirmation = await questionary.text(
-            "Type 'DELETE' to confirm:",
-            validate=lambda text: text == "DELETE" or "Must type DELETE exactly (case-sensitive)",
-            style=warning_style,
-            qmark="⚠",
-            instruction="(Type DELETE in all caps to confirm)",
-        ).ask_async()
-    except (KeyboardInterrupt, EOFError):
-        console.print()
-        console.print("[dim]✓ Deletion cancelled.[/dim]")
-        console.print()
-        return False
-
-    if confirmation != "DELETE":
-        console.print()
-        console.print("[dim]✓ Deletion cancelled.[/dim]")
-        console.print()
-        return False
-
-    return True
-
-
-async def _select_thread_interactively(
-    threads, current_thread_id: str | None
-) -> tuple[str, str] | tuple[None, None]:
-    """Present an interactive picker to choose a thread and action.
-
-    Returns tuple of (thread_id, action) where action is 'switch', 'delete', or 'rename'.
-    Returns (None, None) if selection was cancelled.
-    """
     if not threads:
-        return None, None
+        console.print("[yellow]No threads available. Use /new to create one.[/yellow]")
+        console.print()
+        return
 
-    return await _select_thread_with_questionary(threads, current_thread_id)
+    console.print("[bold]Conversation Threads[/bold]")
+    console.print()
+    for idx, thread in enumerate(threads, start=1):
+        prefix = "*" if thread["id"] == current_thread_id else " "
+        summary = _format_thread_summary(thread, current_thread_id)
+        console.print(f"{idx:>2}. {prefix} {summary}")
+    console.print()
+    console.print(
+        "[dim]Commands: /threads switch <#|id>, rename <#|id> <name>, delete <#|id> --force, info <#|id>, list[/dim]"
+    )
+    console.print()
 
 
-# Removed _select_thread_fallback - no longer needed after questionary migration
+def _resolve_thread_identifier(identifier: str, threads: list[dict]) -> dict | None:
+    """Resolve a numeric index or id prefix to a thread dict."""
+    if not identifier:
+        return None
+
+    if identifier.isdigit():
+        idx = int(identifier)
+        if 1 <= idx <= len(threads):
+            return threads[idx - 1]
+
+    for thread in threads:
+        if thread["id"] == identifier:
+            return thread
+
+    matches = [thread for thread in threads if thread["id"].startswith(identifier)]
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+async def _load_enriched_threads(thread_manager) -> list[dict]:
+    """Load threads with LangSmith metrics and server previews."""
+    threads = thread_manager.list_threads()
+    if not threads:
+        return []
+
+    enriched = [_enrich_thread_with_server_data(t) for t in threads]
+    langsmith_client = get_langsmith_client()
+    project_name = os.getenv("LANGCHAIN_PROJECT", "deepagents-cli")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        enriched = await _enrich_threads_with_metrics(
+            enriched,
+            langsmith_client,
+            project_name,
+            executor,
+        )
+    return enriched
 
 
 async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool:
-    """Handle /threads subcommands (async version)."""
+    """Handle /threads commands without optional dependencies."""
     args = args.strip()
+    parts = shlex.split(args) if args else []
 
-    if not args:
-        threads = thread_manager.list_threads()
-        current_id = thread_manager.get_current_thread_id()
+    threads = await _load_enriched_threads(thread_manager)
+    current_id = thread_manager.get_current_thread_id()
 
-        if not threads:
-            console.print()
-            console.print("[yellow]No threads available.[/yellow]")
-            console.print()
-            return True
-
-        # Phase 1: Enrich with server data (sync, blocking)
-        enriched_threads = [_enrich_thread_with_server_data(t) for t in threads]
-
-        # Phase 2: Enrich with LangSmith metrics (async, concurrent)
-        langsmith_client = get_langsmith_client()
-        project_name = os.getenv("LANGCHAIN_PROJECT", "deepagents-cli")
-
-        # Use context manager for executor cleanup
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            enriched_threads = await _enrich_threads_with_metrics(
-                enriched_threads, langsmith_client, project_name, executor
-            )
-
-        console.print()
-        try:
-            target_id, action = await _select_thread_interactively(enriched_threads, current_id)
-        except KeyboardInterrupt:
-            console.print("\n[red]Thread selection interrupted.[/red]")
-            console.print()
-            return True
-
-        console.print()
-
-        if not target_id or not action:
-            console.print("[dim]Selection cancelled.[/dim]")
-            console.print()
-            return True
-
-        # Get thread metadata for all actions
-        thread = next((t for t in enriched_threads if t["id"] == target_id), None)
-        if not thread:
-            console.print("[red]Thread not found.[/red]")
-            console.print()
-            return True
-
-        thread_name = thread.get("display_name") or thread.get("name") or "(unnamed)"
-        short_id = target_id[:8]
-
-        # Handle action
-        if action == "switch":
-            try:
-                thread_manager.switch_thread(target_id)
-                console.print()
-                console.print(
-                    f"[{COLORS['primary']}]✓ Switched to thread: {thread_name} ({short_id})[/{COLORS['primary']}]"
-                )
-                console.print()
-            except ValueError as e:
-                console.print()
-                console.print(f"[red]Error: {e}[/red]")
-                console.print()
-
-        elif action == "delete":
-            # Confirm deletion
-            if not await _confirm_thread_deletion(thread):
-                return True
-
-            # Perform deletion
-            try:
-                thread_manager.delete_thread(target_id, agent)
-                console.print()
-                console.print(f"[green]✓ Deleted thread: {thread_name} ({short_id})[/green]")
-                console.print()
-            except ValueError as e:
-                console.print()
-                console.print(f"[red]Error: {e}[/red]")
-                console.print()
-
-        elif action == "rename":
-            import questionary
-            from questionary import Style
-
-            # Custom style for rename
-            rename_style = Style(
-                [
-                    ("qmark", f"{COLORS['primary']} bold"),
-                    ("question", "bold"),
-                    ("answer", f"{COLORS['primary']} bold"),
-                    ("instruction", "#888888 italic"),
-                    ("text", ""),
-                ]
-            )
-
-            console.print()
-            try:
-                new_name = await questionary.text(
-                    "Enter new thread name:",
-                    default=thread_name if thread_name != "(unnamed)" else "",
-                    style=rename_style,
-                    qmark="✎",
-                    instruction="(Enter to confirm, Ctrl+C to cancel)",
-                    validate=lambda text: len(text.strip()) > 0 or "Thread name cannot be empty",
-                ).ask_async()
-            except (KeyboardInterrupt, EOFError):
-                console.print()
-                console.print("[dim]✓ Rename cancelled.[/dim]")
-                console.print()
-                return True
-
-            if not new_name or new_name.strip() == thread_name:
-                console.print()
-                console.print("[dim]✓ Rename cancelled.[/dim]")
-                console.print()
-                return True
-
-            try:
-                thread_manager.rename_thread(target_id, new_name.strip())
-                console.print()
-                console.print(
-                    f"[{COLORS['primary']}]✓ Renamed thread to: {new_name.strip()} [dim]({short_id})[/dim][/{COLORS['primary']}]"
-                )
-                console.print()
-            except ValueError as e:
-                console.print()
-                console.print(f"[red]✕ Error: {e}[/red]")
-                console.print()
-
+    if not parts or parts[0].lower() == "list":
+        _print_thread_list(threads, current_id)
         return True
 
-    # If args provided, unsupported
-    console.print()
-    console.print("[yellow]The /threads command doesn't take arguments[/yellow]")
-    console.print("[dim]Just type /threads to open the interactive picker[/dim]")
+    subcommand = parts[0].lower()
+    operands = parts[1:]
+
+    def require_target() -> dict | None:
+        if not operands:
+            console.print("[red]Provide a thread number or id.[/red]")
+            console.print()
+            return None
+        target = _resolve_thread_identifier(operands[0], threads)
+        if not target:
+            console.print(f"[red]Thread '{operands[0]}' not found.[/red]")
+            console.print()
+            return None
+        return target
+
+    if subcommand == "switch":
+        target = require_target()
+        if not target:
+            return True
+        try:
+            thread_manager.switch_thread(target["id"])
+            display_name = target.get("display_name") or target.get("name") or "(unnamed)"
+            console.print()
+            console.print(
+                f"[{COLORS['primary']}]✓ Switched to thread: {display_name} ({target['id'][:8]})[/{COLORS['primary']}]"
+            )
+            console.print()
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            console.print()
+        return True
+
+    if subcommand == "rename":
+        target = require_target()
+        if not target:
+            return True
+        if len(operands) < 2:
+            console.print("[red]Provide a new name after the thread id.[/red]")
+            console.print()
+            return True
+        new_name = " ".join(operands[1:]).strip()
+        if not new_name:
+            console.print("[red]Thread name cannot be empty.[/red]")
+            console.print()
+            return True
+        try:
+            thread_manager.rename_thread(target["id"], new_name)
+            console.print()
+            console.print(
+                f"[{COLORS['primary']}]✓ Renamed thread to: {new_name} ({target['id'][:8]})[/{COLORS['primary']}]"
+            )
+            console.print()
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            console.print()
+        return True
+
+    if subcommand == "delete":
+        flags = {flag for flag in operands if flag in {"--force", "-f"}}
+        operands = [op for op in operands if op not in flags]
+        target = require_target()
+        if not target:
+            return True
+        if not flags:
+            console.print(
+                "[yellow]Add --force to confirm deletion (this removes checkpoints and metadata).[/yellow]"
+            )
+            console.print()
+            return True
+        try:
+            thread_manager.delete_thread(target["id"], agent)
+            console.print()
+            console.print(f"[green]✓ Deleted thread: {target['id'][:8]}[/green]")
+            console.print()
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            console.print()
+        return True
+
+    if subcommand == "info":
+        target = require_target()
+        if not target:
+            return True
+        metadata = target.get("metadata") or {}
+        console.print()
+        console.print(
+            f"[bold]{target.get('display_name') or target.get('name') or '(unnamed)'}[/bold]"
+        )
+        console.print(f"ID: {target['id']}")
+        console.print(f"Created: {target.get('created')}")
+        console.print(f"Last used: {target.get('last_used')}")
+        console.print(f"Parent: {target.get('parent_id')}")
+        console.print(f"Metadata: {metadata}")
+        console.print()
+        return True
+
+    console.print("[yellow]Unknown /threads subcommand.[/yellow]")
+    console.print("[dim]Use /threads list to see available options.[/dim]")
     console.print()
     return True
 
 
+def _coerce_message_limit(raw_value: str) -> int | None:
+    """Normalize a --messages/-n argument into a bounded integer or None."""
+
+    normalized = raw_value.strip().lower()
+    if not normalized or normalized in {"all", "*", "max"}:
+        return None
+
+    limit = int(normalized)
+    if limit <= 0:
+        return None
+    return min(limit, HANDOFF_MAX_MESSAGE_LIMIT)
+
+
+def _parse_handoff_args(arg_string: str) -> tuple[bool, int | None]:
+    """Return preview flag + window size extracted from /handoff args."""
+
+    preview_only = False
+    message_limit = HANDOFF_DEFAULT_MESSAGE_LIMIT
+    if not arg_string:
+        return preview_only, message_limit
+
+    tokens = shlex.split(arg_string)
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in {"--preview", "-p"}:
+            preview_only = True
+        elif token.startswith("--messages="):
+            message_limit = _coerce_message_limit(token.split("=", 1)[1])
+        elif token in {"--messages", "-n"}:
+            idx += 1
+            if idx >= len(tokens):
+                msg = "Missing value for --messages"
+                raise ValueError(msg)
+            message_limit = _coerce_message_limit(tokens[idx])
+        elif token in {"--help", "-h"}:
+            msg = "Usage: /handoff [--preview] [--messages N]"
+            raise ValueError(msg)
+        else:
+            msg = f"Unknown /handoff option: {token}"
+            raise ValueError(msg)
+        idx += 1
+    return preview_only, message_limit
+
+
+def _limit_messages_for_summary(
+    messages: Sequence[BaseMessage],
+    limit: int | None,
+) -> list[BaseMessage]:
+    """Return the most recent messages while keeping tool-call pairs intact."""
+
+    window = list(messages)
+    if limit is None or limit <= 0 or len(window) <= limit:
+        return window
+
+    start_index = len(window) - limit
+    limited = list(window[start_index:])
+
+    # Ensure we don't orphan a tool message that needs the preceding AI call.
+    if limited and isinstance(limited[0], ToolMessage):
+        preceding_index = start_index - 1
+        if preceding_index >= 0 and isinstance(window[preceding_index], AIMessage):
+            limited.insert(0, window[preceding_index])
+    return limited
+
+
 async def handle_handoff_command(args: str, agent, session_state) -> bool:
-    """Handle /handoff command via tool invocation.
+    """Manual `/handoff` entry point that summarizes and persists the thread.
 
-    Args:
-        args: Command arguments (--preview or -p for preview only)
-        agent: The agent instance
-        session_state: Current session state
-
-    Returns:
-        True (command handled)
+    The CLI owns user-initiated handoffs while middleware (HandoffTool +
+    HandoffSummarization + HandoffCleanup) continues to manage automatic
+    lifecycle hooks. This handler gathers the recent messages, generates a
+    summary with the configured model, prompts the user for approval, and
+    persists the `<current_thread_summary>` block via existing helpers.
     """
+
     if not session_state or not session_state.thread_manager:
         console.print()
         console.print("[red]Thread manager not available for handoff.[/red]")
@@ -672,30 +561,182 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
         console.print()
         return True
 
-    # Parse args
-    preview_only = "--preview" in args or "-p" in args
+    try:
+        preview_only, message_limit = _parse_handoff_args(args)
+    except ValueError as exc:
+        console.print()
+        console.print(f"[red]{exc}[/red]")
+        console.print("[dim]/handoff usage: /handoff [--preview] [--messages N][/dim]")
+        console.print()
+        return True
 
-    # Get current thread info
-    thread_id = session_state.thread_manager.get_current_thread_id()
-    assistant_id = getattr(session_state.thread_manager, "assistant_id", None)
+    model = getattr(session_state, "model", None)
+    if model is None:
+        console.print()
+        console.print("[red]Model is not initialized yet; try again in a moment.[/red]")
+        console.print()
+        return True
+
+    thread_manager = session_state.thread_manager
+    thread_id = thread_manager.get_current_thread_id()
+    assistant_id = getattr(thread_manager, "assistant_id", None) or "agent"
 
     console.print()
-    console.print(f"[{COLORS['primary']}]Initiating handoff...[/]")
-
-    # Use execute_task to properly handle state-based interrupts via streaming
-    # This follows LangChain v1 best practices for interrupt handling
-
-    user_input = "Please call the request_handoff tool to initiate thread handoff."
-
-    await execute_task(
-        user_input=user_input,
-        agent=agent,
-        assistant_id=assistant_id,
-        session_state=session_state,
-        token_tracker=None,
+    window_text = "all recent" if not message_limit else f"last {message_limit}"
+    console.print(
+        f"[{COLORS['primary']}]Collecting {window_text} messages before handoff...[/]"
     )
 
-    # The execution loop handles approval UI and persistence when it detects handoff_approval_pending
+    config = {"configurable": {"thread_id": thread_id}}
+    if assistant_id:
+        config["configurable"]["assistant_id"] = assistant_id
+
+    try:
+        state = await agent.aget_state(config)
+    except Exception as exc:  # pragma: no cover - defensive guarantee
+        console.print()
+        console.print(f"[red]Unable to load conversation history: {exc}[/red]")
+        console.print()
+        return True
+
+    state_values = getattr(state, "values", {}) or {}
+    all_messages = list(state_values.get("messages") or [])
+    if not all_messages:
+        console.print()
+        console.print("[yellow]No conversation history found to summarize.[/yellow]")
+        console.print()
+        return True
+
+    selected = select_messages_for_summary(all_messages) or all_messages
+    windowed = _limit_messages_for_summary(selected, message_limit)
+
+    try:
+        summary = generate_handoff_summary(
+            model=model,
+            messages=windowed,
+            assistant_id=assistant_id,
+            parent_thread_id=thread_id,
+        )
+    except Exception as exc:  # pragma: no cover - surfaced to the CLI
+        console.print()
+        console.print(f"[red]Failed to generate handoff summary: {exc}[/red]")
+        console.print()
+        return True
+
+    current_summary = summary
+    proposal = HandoffProposal(
+        handoff_id=current_summary.handoff_id,
+        summary_json=dict(current_summary.summary_json),
+        summary_md=current_summary.summary_md,
+        parent_thread_id=thread_id,
+        assistant_id=assistant_id,
+    )
+
+    iteration = 0
+    while True:
+        decision = await prompt_handoff_decision(proposal, preview_only=preview_only)
+
+        if decision.status == "preview":
+            return True
+
+        if decision.status == "declined":
+            console.print("[dim]Handoff cancelled per user request.[/dim]")
+            console.print()
+            return True
+
+        if decision.status != "refine":
+            break
+
+        feedback = (decision.feedback or "").strip()
+        if not feedback:
+            console.print(
+                "[yellow]Feedback was empty; keeping the current summary.[/yellow]"
+            )
+            continue
+
+        next_iteration = iteration + 1
+        if next_iteration >= MAX_REFINEMENT_ITERATIONS:
+            console.print()
+            console.print(
+                f"[yellow]Reached refinement limit ({MAX_REFINEMENT_ITERATIONS}). "
+                "Using the latest summary as-is.[/yellow]"
+            )
+            console.print()
+            decision = HandoffDecision(
+                status="accepted",
+                summary_md=proposal.summary_md,
+                summary_json=proposal.summary_json,
+            )
+            break
+
+        iteration = next_iteration
+        console.print()
+        console.print(
+            f"[{COLORS['primary']}]Refining summary (iteration {iteration})...[/]"
+        )
+
+        try:
+            refined_summary = generate_handoff_summary(
+                model=model,
+                messages=windowed,
+                assistant_id=assistant_id,
+                parent_thread_id=thread_id,
+                feedback=feedback,
+                previous_summary_md=proposal.summary_md,
+                iteration=iteration,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced to CLI
+            console.print()
+            console.print(f"[red]Failed to refine handoff summary: {exc}[/red]")
+            console.print()
+            return True
+
+        current_summary = refined_summary
+        proposal = HandoffProposal(
+            handoff_id=current_summary.handoff_id,
+            summary_json=dict(current_summary.summary_json),
+            summary_md=current_summary.summary_md,
+            parent_thread_id=thread_id,
+            assistant_id=assistant_id,
+        )
+
+    final_summary_json = dict(decision.summary_json or current_summary.summary_json)
+    final_summary_json["handoff_id"] = current_summary.handoff_id
+    final_summary_md = decision.summary_md or current_summary.summary_md
+    prepared_summary = HandoffSummary(
+        handoff_id=current_summary.handoff_id,
+        summary_json=final_summary_json,
+        summary_md=final_summary_md,
+    )
+
+    try:
+        child_id = apply_handoff_acceptance(
+            session_state=session_state,
+            summary=prepared_summary,
+            summary_md=final_summary_md,
+            summary_json=final_summary_json,
+            parent_thread_id=thread_id,
+        )
+    except Exception as exc:  # pragma: no cover - surfaced to CLI
+        console.print()
+        console.print(f"[red]Failed to persist handoff summary: {exc}[/red]")
+        console.print()
+        return True
+
+    try:
+        thread_manager.switch_thread(child_id)
+        console.print()
+        console.print(
+            f"[green]✓ Handoff recorded. Switched to new thread: {child_id[:8]}[/green]"
+        )
+        console.print()
+    except ValueError as exc:
+        console.print()
+        console.print(
+            f"[yellow]Summary saved, but thread switch failed: {exc}[/yellow]"
+        )
+        console.print()
+
     return True
 
 
@@ -747,22 +788,6 @@ async def handle_command(
             )
             console.print()
 
-        return True
-
-    if base_cmd == "menu" or base_cmd == "m":
-        # Open main menu
-        if not session_state:
-            console.print()
-            console.print("[red]Session state not available[/red]")
-            console.print()
-            return True
-
-        from .menu_system import MenuSystem
-
-        menu_system = MenuSystem(session_state, agent, token_tracker)
-        result = await menu_system.show_main_menu()
-        if result == "exit":
-            return "exit"
         return True
 
     if base_cmd == "help":

@@ -17,6 +17,7 @@ from requests.exceptions import HTTPError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from deepagents.middleware.handoff_summarization import (
+    MAX_REFINEMENT_ITERATIONS,
     HandoffSummary,
     generate_handoff_summary,
     select_messages_for_summary,
@@ -24,7 +25,7 @@ from deepagents.middleware.handoff_summarization import (
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
 from .handoff_persistence import apply_handoff_acceptance
-from .handoff_ui import HandoffProposal, prompt_handoff_decision
+from .handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
 
@@ -622,28 +623,88 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
         console.print()
         return True
 
+    current_summary = summary
     proposal = HandoffProposal(
-        handoff_id=summary.handoff_id,
-        summary_json=dict(summary.summary_json),
-        summary_md=summary.summary_md,
+        handoff_id=current_summary.handoff_id,
+        summary_json=dict(current_summary.summary_json),
+        summary_md=current_summary.summary_md,
         parent_thread_id=thread_id,
         assistant_id=assistant_id,
     )
 
-    decision = prompt_handoff_decision(proposal, preview_only=preview_only)
+    iteration = 0
+    while True:
+        decision = await prompt_handoff_decision(proposal, preview_only=preview_only)
 
-    if decision.status == "preview":
-        return True
+        if decision.status == "preview":
+            return True
 
-    if decision.status == "declined":
-        console.print("[dim]Handoff cancelled per user request.[/dim]")
+        if decision.status == "declined":
+            console.print("[dim]Handoff cancelled per user request.[/dim]")
+            console.print()
+            return True
+
+        if decision.status != "refine":
+            break
+
+        feedback = (decision.feedback or "").strip()
+        if not feedback:
+            console.print(
+                "[yellow]Feedback was empty; keeping the current summary.[/yellow]"
+            )
+            continue
+
+        next_iteration = iteration + 1
+        if next_iteration >= MAX_REFINEMENT_ITERATIONS:
+            console.print()
+            console.print(
+                f"[yellow]Reached refinement limit ({MAX_REFINEMENT_ITERATIONS}). "
+                "Using the latest summary as-is.[/yellow]"
+            )
+            console.print()
+            decision = HandoffDecision(
+                status="accepted",
+                summary_md=proposal.summary_md,
+                summary_json=proposal.summary_json,
+            )
+            break
+
+        iteration = next_iteration
         console.print()
-        return True
+        console.print(
+            f"[{COLORS['primary']}]Refining summary (iteration {iteration})...[/]"
+        )
 
-    final_summary_json = decision.summary_json or summary.summary_json
-    final_summary_md = decision.summary_md or summary.summary_md
+        try:
+            refined_summary = generate_handoff_summary(
+                model=model,
+                messages=windowed,
+                assistant_id=assistant_id,
+                parent_thread_id=thread_id,
+                feedback=feedback,
+                previous_summary_md=proposal.summary_md,
+                iteration=iteration,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced to CLI
+            console.print()
+            console.print(f"[red]Failed to refine handoff summary: {exc}[/red]")
+            console.print()
+            return True
+
+        current_summary = refined_summary
+        proposal = HandoffProposal(
+            handoff_id=current_summary.handoff_id,
+            summary_json=dict(current_summary.summary_json),
+            summary_md=current_summary.summary_md,
+            parent_thread_id=thread_id,
+            assistant_id=assistant_id,
+        )
+
+    final_summary_json = dict(decision.summary_json or current_summary.summary_json)
+    final_summary_json["handoff_id"] = current_summary.handoff_id
+    final_summary_md = decision.summary_md or current_summary.summary_md
     prepared_summary = HandoffSummary(
-        handoff_id=summary.handoff_id,
+        handoff_id=current_summary.handoff_id,
         summary_json=final_summary_json,
         summary_md=final_summary_md,
     )

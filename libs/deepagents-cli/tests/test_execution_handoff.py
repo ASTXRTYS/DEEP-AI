@@ -98,7 +98,8 @@ def test_resolve_handoff_action_preserves_preview_flag() -> None:
     assert normalized["preview_only"] is True
 
 
-def test_prompt_handoff_decision_preview_mode_short_circuits() -> None:
+@pytest.mark.asyncio
+async def test_prompt_handoff_decision_preview_mode_short_circuits() -> None:
     proposal = HandoffProposal(
         handoff_id="handoff-preview",
         summary_json={"title": "Preview", "tldr": "TLDR", "body": []},
@@ -107,9 +108,28 @@ def test_prompt_handoff_decision_preview_mode_short_circuits() -> None:
         assistant_id="assistant-1",
     )
 
-    decision = prompt_handoff_decision(proposal, preview_only=True)
+    decision = await prompt_handoff_decision(proposal, preview_only=True)
 
     assert decision.status == "preview"
+    assert decision.summary_md == proposal.summary_md
+
+
+@pytest.mark.asyncio
+async def test_prompt_handoff_decision_is_awaitable(monkeypatch) -> None:
+    proposal = HandoffProposal(
+        handoff_id="handoff-awaitable",
+        summary_json={"title": "Awaitable", "tldr": "TLDR", "body": []},
+        summary_md="**Awaitable summary**",
+        parent_thread_id="thread-1",
+        assistant_id="assistant-1",
+    )
+
+    responses = iter([""])
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: next(responses))
+
+    decision = await prompt_handoff_decision(proposal)
+
+    assert decision.status == "accepted"
     assert decision.summary_md == proposal.summary_md
 
 

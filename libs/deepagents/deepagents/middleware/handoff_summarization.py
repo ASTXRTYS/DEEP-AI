@@ -11,9 +11,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import re
-from typing import Any, Iterable, Sequence
+from typing import Annotated, Any, Iterable, Sequence
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    PrivateStateAttr,
+    hook_config,
+)
 from langchain.agents.middleware.human_in_the_loop import (
     ActionRequest,
     HITLRequest,
@@ -21,6 +26,7 @@ from langchain.agents.middleware.human_in_the_loop import (
 )
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -37,6 +43,12 @@ MAX_PROMPT_TOKENS = 4000
 MAX_SUMMARY_OUTPUT_TOKENS = 200
 MAX_MESSAGES_TO_SCORE = 120
 MAX_TOOL_PAIR_LOOKBACK = 25
+MAX_REFINEMENT_ITERATIONS = 3
+REFINEMENT_PROMPT_HEADER = (
+    "You are refining a human handoff summary based on reviewer feedback. "
+    "Preserve factual accuracy from the conversation while updating the markdown summary "
+    "so it addresses the requested changes."
+)
 
 
 @dataclass
@@ -57,6 +69,9 @@ class HandoffActionArgs(TypedDict):
     summary_json: dict[str, Any]
     summary_md: str
     preview_only: bool
+    iteration: int
+    feedback: NotRequired[str]
+    feedback_history: NotRequired[list[dict[str, Any]]]
 
 
 class HandoffInterruptMetadata(TypedDict, total=False):
@@ -80,6 +95,17 @@ class HandoffDecisionRecord(TypedDict, total=False):
     assistant_id: NotRequired[str]
     parent_thread_id: NotRequired[str]
     preview_only: NotRequired[bool]
+    iteration: NotRequired[int]
+    feedback_history: NotRequired[list[dict[str, Any]]]
+
+
+class HandoffState(AgentState):
+    """Extended agent state holding private refinement metadata."""
+
+    _handoff_iteration: NotRequired[Annotated[int, PrivateStateAttr]]
+    _handoff_feedback: NotRequired[Annotated[str | None, PrivateStateAttr]]
+    _handoff_previous_summary: NotRequired[Annotated[str | None, PrivateStateAttr]]
+    _handoff_refinement_history: NotRequired[Annotated[list[dict[str, Any]], PrivateStateAttr]]
 
 
 def _build_action_args(
@@ -88,15 +114,24 @@ def _build_action_args(
     assistant_id: str,
     parent_thread_id: str,
     preview_only: bool,
+    iteration: int,
+    feedback: str | None,
+    feedback_history: Sequence[dict[str, Any]] | None,
 ) -> HandoffActionArgs:
-    return {
+    args: HandoffActionArgs = {
         "handoff_id": summary.handoff_id,
         "assistant_id": assistant_id,
         "parent_thread_id": parent_thread_id,
         "summary_json": dict(summary.summary_json),
         "summary_md": str(summary.summary_md),
         "preview_only": bool(preview_only),
+        "iteration": int(iteration),
     }
+    if feedback:
+        args["feedback"] = str(feedback)
+    if feedback_history:
+        args["feedback_history"] = [dict(entry) for entry in feedback_history if isinstance(entry, dict)]
+    return args
 
 
 def _build_interrupt_metadata(args: HandoffActionArgs) -> HandoffInterruptMetadata:
@@ -129,7 +164,11 @@ def _normalize_decision(
         "preview_only": action_args["preview_only"],
         "summary_json": deepcopy(action_args["summary_json"]),
         "summary_md": action_args["summary_md"],
+        "iteration": action_args.get("iteration", 0),
     }
+    history = action_args.get("feedback_history") or []
+    if history:
+        normalized["feedback_history"] = [dict(entry) for entry in history if isinstance(entry, dict)]
 
     if isinstance(resume_data, dict):
         decisions = resume_data.get("decisions") or []
@@ -283,18 +322,56 @@ def render_summary_markdown(title: str, tldr: str, body: Iterable[str]) -> str:
     )
 
 
+def _build_refinement_prompt(
+    *,
+    iteration: int,
+    feedback: str,
+    previous_summary_md: str | None,
+    prompt_messages: str,
+) -> str:
+    summary_section = (previous_summary_md or "Previous summary unavailable.").strip()
+    feedback_section = feedback.strip()
+    return (
+        f"{REFINEMENT_PROMPT_HEADER}\n\n"
+        f"Iteration: {iteration}\n\n"
+        "Previous summary markdown:\n"
+        f"{summary_section}\n\n"
+        "Reviewer feedback:\n"
+        f"{feedback_section or 'No specific feedback was provided.'}\n\n"
+        "Conversation context to reference:\n"
+        f"{prompt_messages}\n"
+        "\n"
+        "Return the refined summary in the exact markdown structure shown above "
+        "(title, TL;DR, bullet list)."
+    )
+
+
 def generate_handoff_summary(
     *,
     model: BaseChatModel | str,
     messages: Sequence[BaseMessage],
     assistant_id: str,
     parent_thread_id: str,
+    feedback: str | None = None,
+    previous_summary_md: str | None = None,
+    iteration: int = 0,
 ) -> HandoffSummary:
-    """Generate a structured handoff summary for the provided message history."""
+    """Generate a structured handoff summary for the provided message history.
+
+    Args:
+        model: LLM instance or identifier.
+        messages: Conversation window to summarize.
+        assistant_id: Assistant identifier for metadata enrichment.
+        parent_thread_id: Thread identifier for metadata enrichment.
+        feedback: Optional reviewer feedback to incorporate for refinements.
+        previous_summary_md: Markdown from the prior iteration, if any.
+        iteration: Current iteration count (0-based).
+    """
 
     from uuid import uuid4
 
     llm = _ensure_model(model)
+    handoff_id = str(uuid4())
 
     selected = select_messages_for_summary(messages)
     trimmed = _trim_for_prompt(selected)
@@ -302,8 +379,41 @@ def generate_handoff_summary(
 
     from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 
+    if feedback and iteration > 0:
+        rendered_prompt = _build_refinement_prompt(
+            iteration=iteration,
+            feedback=feedback,
+            previous_summary_md=previous_summary_md,
+            prompt_messages=prompt_messages,
+        )
+    else:
+        rendered_prompt = DEFAULT_SUMMARY_PROMPT.format(messages=prompt_messages)
+
+    summary_type = "refinement" if iteration > 0 else "initial"
+    has_feedback = bool(feedback)
+    feedback_preview = feedback[:100] if feedback else None
+
+    config = RunnableConfig(
+        run_name=f"generate_handoff_summary_iter_{iteration}",
+        metadata={
+            "handoff_iteration": iteration,
+            "has_feedback": has_feedback,
+            "feedback_preview": feedback_preview,
+            "summary_type": summary_type,
+            "parent_thread_id": parent_thread_id,
+            "assistant_id": assistant_id,
+            "handoff_id": handoff_id,
+        },
+        tags=[
+            "handoff-summary",
+            f"iteration-{iteration}",
+            summary_type,
+        ],
+    )
+
     response = llm.invoke(
-        DEFAULT_SUMMARY_PROMPT.format(messages=prompt_messages),
+        rendered_prompt,
+        config=config,
         max_tokens=MAX_SUMMARY_OUTPUT_TOKENS,
     )
 
@@ -326,7 +436,6 @@ def generate_handoff_summary(
     tokens_used = usage.get("output_tokens") or usage.get("total_tokens") or 0
 
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    handoff_id = str(uuid4())
     summary_md = render_summary_markdown(title, tldr, body)
     summary_json = {
         "schema_version": 1,
@@ -345,7 +454,7 @@ def generate_handoff_summary(
     return HandoffSummary(handoff_id=handoff_id, summary_json=summary_json, summary_md=summary_md)
 
 
-class HandoffSummarizationMiddleware(AgentMiddleware):
+class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
     """Generate summaries and emit the canonical handoff HITL payload.
 
     Responsibilities:
@@ -367,6 +476,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
     - ``handoff_approved``: Convenience boolean derived from the decision.
     """
 
+    state_schema = HandoffState
+
     def __init__(self, model: BaseChatModel | str) -> None:
         """Initialize summarization middleware.
 
@@ -376,7 +487,24 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         super().__init__()
         self.model = _ensure_model(model)
 
-    def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    def _clear_refinement_state(self) -> dict[str, Any]:
+        return {
+            "_handoff_iteration": 0,
+            "_handoff_feedback": None,
+            "_handoff_previous_summary": None,
+            "_handoff_refinement_history": [],
+        }
+
+    def _sanitize_history(self, state: HandoffState) -> list[dict[str, Any]]:
+        history = state.get("_handoff_refinement_history") or []
+        sanitized: list[dict[str, Any]] = []
+        for entry in history:
+            if isinstance(entry, dict):
+                sanitized.append(dict(entry))
+        return sanitized
+
+    @hook_config(can_jump_to=["model"])
+    def after_model(self, state: HandoffState, runtime: Runtime) -> dict[str, Any] | None:
         """Generate summary after model proposes handoff tool call.
 
         Runs in after_model to ensure tool call is detected in the same phase
@@ -409,6 +537,26 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             or state.get("preview_only")
         )
 
+        # Pull refinement state
+        raw_iteration = state.get("_handoff_iteration") or 0
+        try:
+            iteration = int(raw_iteration)
+        except (TypeError, ValueError):
+            iteration = 0
+        iteration = max(iteration, 0)
+
+        pending_feedback = state.get("_handoff_feedback")
+        if isinstance(pending_feedback, str):
+            pending_feedback = pending_feedback.strip() or None
+        elif pending_feedback is not None:
+            pending_feedback = str(pending_feedback).strip() or None
+
+        previous_summary_md = state.get("_handoff_previous_summary")
+        if previous_summary_md is not None and not isinstance(previous_summary_md, str):
+            previous_summary_md = str(previous_summary_md)
+
+        history = self._sanitize_history(state)
+
         # Generate summary using helper function
         messages = state.get("messages") or []
         summary = generate_handoff_summary(
@@ -416,6 +564,9 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             messages=messages,
             assistant_id=assistant_id,
             parent_thread_id=parent_thread_id,
+            feedback=pending_feedback,
+            previous_summary_md=previous_summary_md,
+            iteration=iteration,
         )
 
         action_args = _build_action_args(
@@ -423,11 +574,18 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
             assistant_id=str(assistant_id),
             parent_thread_id=str(parent_thread_id),
             preview_only=preview_only,
+            iteration=iteration,
+            feedback=pending_feedback,
+            feedback_history=history,
         )
+
+        description = "Review and approve the generated handoff summary."
+        if iteration:
+            description += f" (iteration {iteration})"
 
         action_request: ActionRequest = {
             "name": HANDOFF_ACTION_NAME,
-            "description": "Review and approve the generated handoff summary.",
+            "description": description,
             "args": action_args,
         }
 
@@ -464,17 +622,67 @@ class HandoffSummarizationMiddleware(AgentMiddleware):
         resume_data = interrupt(interrupt_payload)
 
         decision_record = _normalize_decision(resume_data, action_args)
-        approved = decision_record.get("type") == "approve"
+        decision_type = str(decision_record.get("type") or "reject")
+
+        feedback_text = decision_record.get("feedback")
+        if isinstance(feedback_text, str):
+            feedback_text = feedback_text.strip()
+        else:
+            feedback_text = ""
+
+        if decision_type == "edit" and feedback_text:
+            timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            new_history = [
+                *history,
+                {
+                    "iteration": iteration,
+                    "feedback": feedback_text,
+                    "summary_md": summary.summary_md,
+                    "timestamp": timestamp,
+                },
+            ]
+            decision_with_history = dict(decision_record)
+            decision_with_history["feedback_history"] = new_history
+
+            new_iteration = iteration + 1
+            if new_iteration >= MAX_REFINEMENT_ITERATIONS:
+                decision_with_history.setdefault(
+                    "message",
+                    f"Reached maximum refinement iterations ({MAX_REFINEMENT_ITERATIONS}).",
+                )
+                return {
+                    **self._clear_refinement_state(),
+                    "handoff_requested": False,
+                    "handoff_decision": decision_with_history,
+                    "handoff_approved": False,
+                }
+
+            return {
+                "_handoff_iteration": new_iteration,
+                "_handoff_feedback": feedback_text,
+                "_handoff_previous_summary": summary.summary_md,
+                "_handoff_refinement_history": new_history,
+                "handoff_requested": True,
+                "handoff_decision": decision_with_history,
+                "handoff_approved": False,
+                "jump_to": "model",
+            }
+
+        approved = decision_type == "approve"
+        finalized_decision = dict(decision_record)
+        if history and "feedback_history" not in finalized_decision:
+            finalized_decision["feedback_history"] = history
 
         return {
             # Clear the request flag once we have a final decision so future
             # handoff attempts explicitly set it again via the tool.
+            **self._clear_refinement_state(),
             "handoff_requested": False,
-            "handoff_decision": dict(decision_record),
+            "handoff_decision": finalized_decision,
             "handoff_approved": approved,
         }
 
-    def _handoff_requested(self, state: AgentState) -> bool:
+    def _handoff_requested(self, state: HandoffState) -> bool:
         """Check if handoff was requested via tool call or state flag."""
 
         # Check for explicit state flag

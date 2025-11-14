@@ -1,0 +1,810 @@
+# DeepWiki Q&A with Code Context for Repository: ASTXRTYS/index
+
+
+
+### Answer
+
+I'll help you understand how to implement a model-in-the-loop refinement system for handoff summaries in your DeepAgents CLI fork.
+
+## Summary
+
+You want to transform the handoff summary editing flow from manual text editing into an iterative LLM refinement loop where users provide natural-language feedback that gets incorporated into subsequent summarization prompts<cite />. This should work for both agent-initiated handoffs (via `HandoffSummarizationMiddleware`) and manual `/handoff` commands, with full traceability in LangSmith<cite />.
+
+## Current Architecture
+
+Your handoff system has two paths:
+
+**Agent-initiated path:**
+- `HandoffSummarizationMiddleware.after_model` generates a summary via `generate_handoff_summary()` and calls `interrupt()` with `ActionRequest` + `ReviewConfig`<cite />
+- `execute_task()` receives the interrupt and calls `prompt_handoff_decision()` index:502-544 
+- User decisions are mapped to HITL format and resumed via `Command(resume={...})` index:546-562 
+
+**Manual `/handoff` path:**
+- Calls `generate_handoff_summary()` directly without middleware involvement<cite />
+- Synchronously prompts for decision and applies acceptance<cite />
+
+## Implementation Strategy
+
+Based on the LangGraph HITL patterns shown in your codebase, here's how to implement the refinement loop:
+
+### 1. Middleware Loop Pattern
+
+The key is to make `HandoffSummarizationMiddleware.after_model` **re-entrant** when it receives feedback. Looking at the LangGraph documentation pattern index:744-751 , you should:
+
+1. Track refinement iteration count in state (e.g., `handoff_refinement_iteration`)
+2. When normalizing the resume decision in `_normalize_decision()`, check if `edited_action.args` contains `feedback`
+3. If feedback exists, **don't finalize** - instead:
+   - Increment iteration counter
+   - Build an enhanced prompt incorporating: original messages + previous summary + user feedback
+   - Call `generate_handoff_summary()` again with the enhanced prompt
+   - Issue another `interrupt()` with updated `HandoffActionArgs` that includes iteration metadata
+4. Only set `handoff_approved=True` when decision type is `"approve"` without feedback
+
+### 2. Enhanced Summarization Prompt
+
+You'll need to modify `generate_handoff_summary()` to accept optional parameters:
+```python
+def generate_handoff_summary(
+    model,
+    messages,
+    assistant_id,
+    parent_thread_id,
+    previous_summary: Optional[str] = None,
+    user_feedback: Optional[str] = None,
+    iteration: int = 0
+)
+```
+
+When `user_feedback` is provided, construct a prompt like:
+```
+{DEFAULT_SUMMARY_PROMPT}
+
+Previous summary attempt:
+{previous_summary}
+
+User feedback for refinement:
+{user_feedback}
+
+Generate an improved summary that addresses the feedback while maintaining accuracy.
+```
+
+### 3. CLI Decision Handling
+
+In `execute_task()`, you already handle interrupts index:502-544 . Extend `prompt_handoff_decision()` to:
+- Add a "Refine" option alongside Accept/Edit/Decline/Preview
+- When "Refine" is selected, prompt for natural-language feedback
+- Return a decision like: `{"type": "edit", "edited_action": {"args": {"feedback": user_feedback_text}}}`
+
+The existing resume mechanism will work index:557-559 :
+```python
+stream_input = Command(resume=hitl_response)
+```
+
+### 4. Manual `/handoff` Integration
+
+For the manual path, you have two options:
+
+**Option A (Recommended):** Refactor to use the middleware path
+- Have `handle_handoff_command()` set `handoff_requested=True` in state and invoke the agent
+- Let `HandoffSummarizationMiddleware` handle the entire flow
+- This ensures consistency and reuses all refinement logic
+
+**Option B:** Implement a local refinement loop
+- Create a helper function that wraps the refinement logic
+- Call it from both middleware and `/handoff` command
+- More code duplication but maintains separation
+
+### 5. Traceability
+
+For LangSmith tracing:
+
+1. **Annotate `HandoffActionArgs`** with iteration metadata:
+```python
+HandoffActionArgs(
+    title=summary.title,
+    summary_md=summary.body,
+    iteration=iteration_count,
+    feedback_history=[...],  # List of all feedback strings
+)
+```
+
+2. **Include metadata in LLM calls**:
+```python
+model.invoke(
+    prompt,
+    config={"metadata": {
+        "handoff_iteration": iteration,
+        "feedback": user_feedback,
+        "parent_thread_id": parent_thread_id
+    }}
+)
+```
+
+3. **Track in `HandoffDecisionRecord`**:
+```python
+HandoffDecisionRecord(
+    decision_type="refine",
+    feedback=user_feedback,
+    iteration=iteration,
+    timestamp=...
+)
+```
+
+## Key Implementation Points
+
+1. **State management**: Add fields like `handoff_refinement_iteration`, `handoff_feedback_history`, `handoff_previous_summary` to track the loop<cite />
+
+2. **Interrupt payload**: The `ActionRequest` description should indicate iteration number: `"Handoff summary (iteration 2) - please review"` index:202-236 
+
+3. **Loop termination**: Only exit when `decision_type == "approve"` without feedback, or when `decision_type == "reject"`<cite />
+
+4. **Preview mode**: Ensure `preview_only` flag still works - it should skip the refinement loop entirely<cite />
+
+## Notes
+
+The LangGraph HITL pattern you're using supports this naturally - the `interrupt()` + `Command(resume=...)` cycle can repeat indefinitely index:26-31 . The key is making your middleware stateful enough to distinguish between "first draft" and "refinement iteration N" and building appropriate prompts for each case. The existing `execute_task()` loop already handles repeated interrupts correctly index:246-262 , so most of your work will be in the middleware and prompt engineering.
+
+
+### Citations
+
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/execution.py (L246-262)
+
+```python
+        while True:
+            interrupt_occurred = False
+            hitl_response = None
+            suppress_resumed_output = False
+            hitl_request = None
+
+            async for chunk in agent.astream(
+                stream_input,
+                stream_mode=["messages", "updates"],  # Dual-mode for HITL support
+                subgraphs=True,
+                config=config,
+                durability="exit",
+            ):
+                # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
+                if not isinstance(chunk, tuple) or len(chunk) != 3:
+                    continue
+
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/execution.py (L502-544)
+
+```python
+            if interrupt_occurred and hitl_request:
+                # Check if auto-approve is enabled
+                if session_state.auto_approve:
+                    # Auto-approve all commands without prompting
+                    decisions = []
+                    for action_request in hitl_request.get("action_requests", []):
+                        # Show what's being auto-approved (brief, dim message)
+                        if spinner_active:
+                            status.stop()
+                            spinner_active = False
+
+                        description = action_request.get("description", "tool action")
+                        console.print()
+                        console.print(f"  [dim]⚡ {description}[/dim]")
+
+                        decisions.append({"type": "approve"})
+
+                    hitl_response = {"decisions": decisions}
+
+                    # Restart spinner for continuation
+                    if not spinner_active:
+                        status.start()
+                        spinner_active = True
+                else:
+                    # Normal HITL flow - stop spinner and prompt user
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+
+                    # Handle human-in-the-loop approval
+                    decisions = []
+                    for action_request in hitl_request.get("action_requests", []):
+                        decision = await asyncio.to_thread(
+                            prompt_for_tool_approval,
+                            action_request,
+                            assistant_id,
+                        )
+                        decisions.append(decision)
+
+                    suppress_resumed_output = any(
+                        decision.get("type") == "reject" for decision in decisions
+                    )
+                    hitl_response = {"decisions": decisions}
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/execution.py (L546-562)
+
+```python
+            if interrupt_occurred and hitl_response:
+                if suppress_resumed_output:
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+
+                    console.print("[yellow]Command rejected.[/yellow]", style="bold")
+                    console.print("Tell the agent what you'd like to do differently.")
+                    console.print()
+                    return
+
+                # Resume the agent with the human decision
+                stream_input = Command(resume=hitl_response)
+                # Continue the while loop to restream
+            else:
+                # No interrupt, break out of while loop
+                break
+```
+
+**File:** langgraph-main/docs/docs/how-tos/human_in_the_loop/add-human-in-the-loop.md (L744-751)
+
+```markdown
+    def human_review_edit(state: State) -> State:
+        result = interrupt({
+            "task": "Please review and edit the generated summary if necessary.",
+            "generated_summary": state["summary"]
+        })
+        return {
+            "summary": result["edited_summary"]
+        }
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py (L202-236)
+
+```python
+    def _create_action_and_config(
+        self,
+        tool_call: ToolCall,
+        config: InterruptOnConfig,
+        state: AgentState,
+        runtime: Runtime,
+    ) -> tuple[ActionRequest, ReviewConfig]:
+        """Create an ActionRequest and ReviewConfig for a tool call."""
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+
+        # Generate description using the description field (str or callable)
+        description_value = config.get("description")
+        if callable(description_value):
+            description = description_value(tool_call, state, runtime)
+        elif description_value is not None:
+            description = description_value
+        else:
+            description = f"{self.description_prefix}\n\nTool: {tool_name}\nArgs: {tool_args}"
+
+        # Create ActionRequest with description
+        action_request = ActionRequest(
+            name=tool_name,
+            args=tool_args,
+            description=description,
+        )
+
+        # Create ReviewConfig
+        # eventually can get tool information and populate args_schema from there
+        review_config = ReviewConfig(
+            action_name=tool_name,
+            allowed_decisions=config["allowed_decisions"],
+        )
+
+        return action_request, review_config
+```
+
+**File:** langgraph-main/docs/docs/concepts/human_in_the_loop.md (L26-31)
+
+```markdown
+* **Persistent execution state**: Interrupts use LangGraph's [persistence](./persistence.md) layer, which saves the graph state, to indefinitely pause graph execution until you resume. This is possible because LangGraph checkpoints the graph state after each step, which allows the system to persist execution context and later resume the workflow, continuing from where it left off. This supports asynchronous human review or input without time constraints.
+
+    There are two ways to pause a graph:
+
+    - [Dynamic interrupts](../how-tos/human_in_the_loop/add-human-in-the-loop.md#pause-using-interrupt): Use `interrupt` to pause a graph from inside a specific node, based on the current state of the graph.
+    - [Static interrupts](../how-tos/human_in_the_loop/add-human-in-the-loop.md#debug-with-interrupts): Use `interrupt_before` and `interrupt_after` to pause the graph at pre-defined points, either before or after a node executes.
+```
+
+## Q2
+
+Can you dive deeper into advanced concepts from LangGraph, LangChain V1, and DeepAgents that will make this feature that I want to add even more elegant?
+
+
+### Answer
+
+I'll explore advanced concepts from LangGraph, LangChain V1, and DeepAgents that can make your model-in-the-loop handoff refinement feature more elegant.
+
+## Advanced LangGraph Patterns
+
+### 1. Reflection Pattern with Structured Feedback
+
+LangGraph's **evaluator-optimizer workflow** is directly applicable to your use case index:1508-1559 . This pattern uses one LLM call to generate content and another to provide evaluation and feedback in a loop index:1510-1512 .
+
+You can enhance your implementation by using **structured output** for feedback collection:
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class SummaryFeedback(BaseModel):
+    quality: Literal["excellent", "good", "needs_improvement"] = Field(
+        description="Overall quality assessment"
+    )
+    specific_feedback: str = Field(
+        description="Specific improvements needed"
+    )
+    focus_areas: list[str] = Field(
+        description="Areas to emphasize (e.g., 'reproduction_steps', 'performance_metrics')"
+    )
+```
+
+This structured approach gives you:
+- **Type-safe feedback** that's easier to incorporate into prompts
+- **Programmatic access** to feedback categories for analytics
+- **Better LangSmith tracing** with structured metadata
+
+### 2. Procedural Memory for Prompt Refinement
+
+LangGraph's **procedural memory** concept index:110-116  involves agents modifying their own prompts based on feedback. This is exactly what you're building index:116-118 .
+
+The pattern shown uses the Store to save and update prompts index:120-141 . You can adapt this:
+
+```python
+def refine_summary_with_memory(state: State, store: BaseStore):
+    namespace = ("handoff_summaries", state["thread_id"])
+    
+    # Retrieve refinement history
+    history = store.search(namespace)
+    
+    # Build enhanced prompt with feedback history
+    prompt = build_refinement_prompt(
+        messages=state["messages"],
+        previous_summaries=[h.value["summary"] for h in history],
+        feedback_history=[h.value["feedback"] for h in history],
+        iteration=len(history)
+    )
+    
+    # Generate refined summary
+    new_summary = model.invoke(prompt)
+    
+    # Store this iteration
+    store.put(namespace, f"iteration_{len(history)}", {
+        "summary": new_summary,
+        "feedback": state.get("user_feedback"),
+        "timestamp": datetime.now()
+    })
+```
+
+This gives you:
+- **Cross-session learning**: Future handoffs can reference past refinement patterns
+- **Audit trail**: Complete history of how summaries evolved
+- **Pattern detection**: Identify common feedback themes to improve base prompts
+
+### 3. Dynamic Few-Shot Example Selection
+
+LangGraph supports **episodic memory through few-shot prompting** index:91-92 . You can use LangSmith Datasets to store high-quality handoff summaries and dynamically retrieve relevant examples index:98-101 .
+
+```python
+from langsmith import Client
+
+client = Client()
+
+def generate_handoff_summary_with_examples(
+    model, messages, assistant_id, parent_thread_id,
+    previous_summary=None, user_feedback=None, iteration=0
+):
+    # Retrieve similar handoff examples from LangSmith
+    examples = client.similar_examples(
+        dataset_name="handoff_summaries",
+        inputs={"messages": messages[-10:]},  # Last 10 messages
+        limit=3
+    )
+    
+    # Build prompt with few-shot examples
+    prompt = f"""
+{DEFAULT_SUMMARY_PROMPT}
+
+Here are examples of high-quality handoff summaries:
+{format_examples(examples)}
+
+{"Previous summary: " + previous_summary if previous_summary else ""}
+{"User feedback: " + user_feedback if user_feedback else ""}
+
+Now generate the summary for this conversation...
+"""
+```
+
+This enables:
+- **Learning from past successes**: Best summaries become training examples
+- **Consistency**: Similar contexts produce similar summary styles
+- **Continuous improvement**: Add refined summaries back to the dataset
+
+## Advanced DeepAgents Patterns
+
+### 4. Middleware Composition for Refinement
+
+DeepAgents' **middleware architecture** index:166-191  allows you to compose multiple middleware layers. You can create a dedicated `HandoffRefinementMiddleware`:
+
+```python
+class HandoffRefinementMiddleware(AgentMiddleware):
+    """Handles iterative refinement of handoff summaries"""
+    
+    def after_model(self, state, model_output, config):
+        if not state.get("handoff_refinement_active"):
+            return model_output
+            
+        feedback = state.get("handoff_feedback")
+        iteration = state.get("handoff_iteration", 0)
+        
+        if feedback and iteration < MAX_REFINEMENT_ITERATIONS:
+            # Generate refined summary
+            refined = self._refine_with_feedback(
+                state, feedback, iteration
+            )
+            
+            # Emit interrupt with refined summary
+            interrupt({
+                "type": "handoff_refinement",
+                "iteration": iteration + 1,
+                "summary": refined,
+                "feedback_applied": feedback
+            })
+            
+            return {
+                **model_output,
+                "handoff_iteration": iteration + 1,
+                "handoff_previous_summary": refined
+            }
+        
+        return model_output
+```
+
+This separation gives you:
+- **Single responsibility**: Each middleware has one job
+- **Reusability**: Use refinement middleware in other contexts
+- **Testability**: Test refinement logic independently
+
+### 5. Subagent Pattern for Specialized Summarization
+
+DeepAgents supports **subagent spawning** index:92-94  for context isolation. You can create a specialized summarization subagent:
+
+```python
+summarization_subagent = {
+    "name": "handoff-summarizer",
+    "description": "Specialized agent for creating handoff summaries",
+    "prompt": """You are an expert at creating concise, actionable handoff summaries.
+    
+Your summaries should:
+- Focus on key decisions and context
+- Include reproduction steps when relevant
+- Highlight blockers and next steps
+- Be scannable and well-structured
+
+When given feedback, incorporate it precisely while maintaining summary quality.""",
+    "tools": [retrieve_context, analyze_tool_calls],
+    "model": "anthropic:claude-sonnet-4-20250514",
+}
+
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-4-20250514",
+    subagents=[summarization_subagent]
+)
+```
+
+Benefits:
+- **Specialized prompting**: Summarization-specific instructions
+- **Context isolation**: Doesn't pollute main agent context
+- **Independent iteration**: Refine summarization without affecting main agent
+
+## Advanced LangChain V1 Patterns
+
+### 6. Streaming with Custom Updates
+
+LangGraph's **streaming system** index:1-33  supports custom updates. You can stream refinement progress:
+
+```python
+def stream_refinement_progress(graph, config):
+    for event in graph.stream(None, config, stream_mode=["updates", "custom"]):
+        if "custom" in event:
+            custom_data = event["custom"]
+            if custom_data.get("type") == "refinement_iteration":
+                # Show progress in CLI
+                console.print(f"[yellow]Refining (iteration {custom_data['iteration']})...[/yellow]")
+                console.print(f"Applying feedback: {custom_data['feedback'][:50]}...")
+```
+
+In your middleware:
+```python
+# Emit custom streaming event
+from langgraph.types import StreamWriter
+
+def after_model(self, state, model_output, config, writer: StreamWriter):
+    writer({
+        "type": "refinement_iteration",
+        "iteration": state["handoff_iteration"],
+        "feedback": state["handoff_feedback"]
+    })
+```
+
+This provides:
+- **Real-time feedback**: User sees refinement happening
+- **Better UX**: No black-box waiting
+- **Debugging**: Stream intermediate states for inspection
+
+### 7. Multi-Agent Communication Pattern
+
+Your handoff system is essentially a **multi-agent handoff** index:29-35 . You can use LangGraph's `Command` pattern more elegantly:
+
+```python
+def handoff_summarization_node(state: State) -> Command:
+    """Node that handles summary generation and refinement"""
+    
+    if state.get("handoff_feedback"):
+        # Refinement iteration
+        summary = refine_summary(state)
+        
+        return Command(
+            goto="human_review",  # Back to human review
+            update={
+                "handoff_summary": summary,
+                "handoff_iteration": state["handoff_iteration"] + 1
+            }
+        )
+    else:
+        # Initial summary
+        summary = generate_initial_summary(state)
+        
+        return Command(
+            goto="human_review",
+            update={"handoff_summary": summary, "handoff_iteration": 1}
+        )
+
+def human_review_node(state: State) -> Command:
+    """Node that collects human feedback"""
+    
+    feedback = interrupt({"summary": state["handoff_summary"]})
+    
+    if feedback["decision"] == "approve":
+        return Command(goto="apply_handoff")
+    elif feedback["decision"] == "refine":
+        return Command(
+            goto="handoff_summarization_node",
+            update={"handoff_feedback": feedback["feedback"]}
+        )
+    else:
+        return Command(goto=END)
+```
+
+This creates a **clean cycle** between summarization and review nodes index:36-50 .
+
+## Integration Strategy
+
+Combine these patterns:
+
+1. **Use structured feedback** (Pattern 1) in your `prompt_handoff_decision()` UI
+2. **Store refinement history** (Pattern 2) in LangGraph Store for cross-session learning
+3. **Add few-shot examples** (Pattern 3) to improve initial summary quality
+4. **Separate refinement middleware** (Pattern 4) from summarization middleware
+5. **Consider a summarization subagent** (Pattern 5) for complex handoffs
+6. **Stream refinement progress** (Pattern 6) for better UX
+7. **Use Command-based routing** (Pattern 7) for cleaner control flow
+
+## Notes
+
+The key insight is that your refinement loop is a **reflection pattern** index:112-120 , which LangGraph explicitly supports. The evaluator-optimizer workflow index:1508-1512  is nearly identical to your use case. By leveraging DeepAgents' middleware system index:323-330  and LangGraph's memory/streaming capabilities, you can build an elegant, traceable refinement system that learns from past interactions and provides real-time feedback to users.
+
+
+### Citations
+
+
+**File:** langgraph-main/docs/docs/tutorials/workflows.md (L1508-1559)
+
+```markdown
+## Evaluator-optimizer
+
+In the evaluator-optimizer workflow, one LLM call generates a response while another provides evaluation and feedback in a loop:
+
+> When to use this workflow: This workflow is particularly effective when we have clear evaluation criteria, and when iterative refinement provides measurable value. The two signs of good fit are, first, that LLM responses can be demonstrably improved when a human articulates their feedback; and second, that the LLM can provide such feedback. This is analogous to the iterative writing process a human writer might go through when producing a polished document.
+
+![evaluator_optimizer.png](./workflows/img/evaluator_optimizer.png)
+
+=== "Graph API"
+
+    :::python
+    ```python
+    # Graph state
+    class State(TypedDict):
+        joke: str
+        topic: str
+        feedback: str
+        funny_or_not: str
+
+
+    # Schema for structured output to use in evaluation
+    class Feedback(BaseModel):
+        grade: Literal["funny", "not funny"] = Field(
+            description="Decide if the joke is funny or not.",
+        )
+        feedback: str = Field(
+            description="If the joke is not funny, provide feedback on how to improve it.",
+        )
+
+
+    # Augment the LLM with schema for structured output
+    evaluator = llm.with_structured_output(Feedback)
+
+
+    # Nodes
+    def llm_call_generator(state: State):
+        """LLM generates a joke"""
+
+        if state.get("feedback"):
+            msg = llm.invoke(
+                f"Write a joke about {state['topic']} but take into account the feedback: {state['feedback']}"
+            )
+        else:
+            msg = llm.invoke(f"Write a joke about {state['topic']}")
+        return {"joke": msg.content}
+
+
+    def llm_call_evaluator(state: State):
+        """LLM evaluates the joke"""
+
+        grade = evaluator.invoke(f"Grade the joke {state['joke']}")
+        return {"funny_or_not": grade.grade, "feedback": grade.feedback}
+```
+
+**File:** langgraph-main/docs/docs/concepts/memory.md (L91-92)
+
+```markdown
+In practice, episodic memories are often implemented through [few-shot example prompting](https://python.langchain.com/docs/concepts/few_shot_prompting/), where agents learn from past sequences to perform tasks correctly. Sometimes it's easier to "show" than "tell" and LLMs learn well from examples. Few-shot learning lets you ["program"](https://x.com/karpathy/status/1627366413840322562) your LLM by updating the prompt with input-output examples to illustrate the intended behavior. While various [best-practices](https://python.langchain.com/docs/concepts/#1-generating-examples) can be used to generate few-shot examples, often the challenge lies in selecting the most relevant examples based on user input.
+:::
+```
+
+**File:** langgraph-main/docs/docs/concepts/memory.md (L98-101)
+
+```markdown
+:::python
+Note that the memory [store](persistence.md#memory-store) is just one way to store data as few-shot examples. If you want to have more developer involvement, or tie few-shots more closely to your evaluation harness, you can also use a [LangSmith Dataset](https://docs.smith.langchain.com/evaluation/how_to_guides/datasets/index_datasets_for_dynamic_few_shot_example_selection) to store your data. Then dynamic few-shot example selectors can be used out-of-the box to achieve this same goal. LangSmith will index the dataset for you and enable retrieval of few shot examples that are most relevant to the user input based upon keyword similarity ([using a BM25-like algorithm](https://docs.smith.langchain.com/how_to_guides/datasets/index_datasets_for_dynamic_few_shot_example_selection) for keyword b ... (truncated)
+
+See this how-to [video](https://www.youtube.com/watch?v=37VaU7e7t5o) for example usage of dynamic few-shot example selection in LangSmith. Also, see this [blog post](https://blog.langchain.dev/few-shot-prompting-to-improve-tool-calling-performance/) showcasing few-shot prompting to improve tool calling performance and this [blog post](https://blog.langchain.dev/aligning-llm-as-a-judge-with-human-preferences/) using few-shot example to align an LLMs to human preferences.
+```
+
+**File:** langgraph-main/docs/docs/concepts/memory.md (L110-118)
+
+```markdown
+#### Procedural memory
+
+[Procedural memory](https://en.wikipedia.org/wiki/Procedural_memory), in both humans and AI agents, involves remembering the rules used to perform tasks. In humans, procedural memory is like the internalized knowledge of how to perform tasks, such as riding a bike via basic motor skills and balance. Episodic memory, on the other hand, involves recalling specific experiences, such as the first time you successfully rode a bike without training wheels or a memorable bike ride through a scenic route. For AI agents, procedural memory is a combination of model weights, agent code, and agent's prompt that collectively determine the agent's functionality. 
+
+In practice, it is fairly uncommon for agents to modify their model weights or rewrite their code. However, it is more common for agents to modify their own prompts. 
+
+One effective approach to refining an agent's instructions is through ["Reflection"](https://blog.langchain.dev/reflection-agents/) or meta-prompting. This involves prompting the agent with its current instructions (e.g., the system prompt) along with recent conversations or explicit user feedback. The agent then refines its own instructions based on this input. This method is particularly useful for tasks where instructions are challenging to specify upfront, as it allows the agent to learn and adapt from its interactions.
+
+For example, we built a [Tweet generator](https://www.youtube.com/watch?v=Vn8A3BxfplE) using external feedback and prompt re-writing to produce high-quality paper summaries for Twitter. In this case, the specific summarization prompt was difficult to specify *a priori*, but it was fairly easy for a user to critique the generated Tweets and provide feedback on how to improve the summarization process. 
+```
+
+**File:** langgraph-main/docs/docs/concepts/memory.md (L120-141)
+
+```markdown
+The below pseudo-code shows how you might implement this with the LangGraph memory [store](persistence.md#memory-store), using the store to save a prompt, the `update_instructions` node to get the current prompt (as well as feedback from the conversation with the user captured in `state["messages"]`), update the prompt, and save the new prompt back to the store. Then, the `call_model` get the updated prompt from the store and uses it to generate a response.
+
+:::python
+```python
+# Node that *uses* the instructions
+def call_model(state: State, store: BaseStore):
+    namespace = ("agent_instructions", )
+    instructions = store.get(namespace, key="agent_a")[0]
+    # Application logic
+    prompt = prompt_template.format(instructions=instructions.value["instructions"])
+    ...
+
+# Node that updates instructions
+def update_instructions(state: State, store: BaseStore):
+    namespace = ("instructions",)
+    current_instructions = store.search(namespace)[0]
+    # Memory logic
+    prompt = prompt_template.format(instructions=current_instructions.value["instructions"], conversation=state["messages"])
+    output = llm.invoke(prompt)
+    new_instructions = output['new_instructions']
+    store.put(("agent_instructions",), "agent_a", {"instructions": new_instructions})
+    ...
+```
+
+**File:** deepagents-master/README.md (L92-94)
+
+```markdown
+**Subagent Spawning**
+
+ A built-in `task` tool enables agents to spawn specialized subagents for context isolation. This keeps the main agent’s context clean while still going deep on specific subtasks.
+```
+
+**File:** deepagents-master/README.md (L166-191)
+
+```markdown
+### `middleware`
+`create_deep_agent` is implemented with middleware that can be customized. You can provide additional middleware to extend functionality, add tools, or implement custom hooks. 
+
+```python
+from langchain_core.tools import tool
+from deepagents import create_deep_agent
+from langchain.agents.middleware import AgentMiddleware
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather in a city."""
+    return f"The weather in {city} is sunny."
+
+@tool
+def get_temperature(city: str) -> str:
+    """Get the temperature in a city."""
+    return f"The temperature in {city} is 70 degrees Fahrenheit."
+
+class WeatherMiddleware(AgentMiddleware):
+  tools = [get_weather, get_temperature]
+
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-4-20250514",
+    middleware=[WeatherMiddleware()]
+)
+```
+```
+
+**File:** deepagents-master/README.md (L323-330)
+
+```markdown
+## Deep Agents Middleware
+
+Deep Agents are built with a modular middleware architecture. As a reminder, Deep Agents have access to:
+- A planning tool
+- A filesystem for storing context and long-term memories
+- The ability to spawn subagents
+
+Each of these features is implemented as separate middleware. When you create a deep agent with `create_deep_agent`, we automatically attach **TodoListMiddleware**, **FilesystemMiddleware** and **SubAgentMiddleware** to your agent.
+```
+
+**File:** langgraph-main/docs/docs/concepts/multi_agent.md (L29-35)
+
+```markdown
+### Handoffs
+
+In multi-agent architectures, agents can be represented as graph nodes. Each agent node executes its step(s) and decides whether to finish execution or route to another agent, including potentially routing to itself (e.g., running in a loop). A common pattern in multi-agent interactions is **handoffs**, where one agent _hands off_ control to another. Handoffs allow you to specify:
+
+- **destination**: target agent to navigate to (e.g., name of the node to go to)
+- **payload**: [information to pass to that agent](#communication-and-state-management) (e.g., state update)
+
+```
+
+**File:** langgraph-main/docs/docs/concepts/multi_agent.md (L36-50)
+
+```markdown
+To implement handoffs in LangGraph, agent nodes can return [`Command`](./low_level.md#command) object that allows you to combine both control flow and state updates:
+
+:::python
+
+```python
+def agent(state) -> Command[Literal["agent", "another_agent"]]:
+    # the condition for routing/halting can be anything, e.g. LLM tool call / structured output, etc.
+    goto = get_next_agent(...)  # 'agent' / 'another_agent'
+    return Command(
+        # Specify which agent to call next
+        goto=goto,
+        # Update the graph state
+        update={"my_state_key": "my_state_value"}
+    )
+```
+```
+
+**File:** langgraph-main/docs/docs/concepts/agentic_concepts.md (L112-120)
+
+```markdown
+### Reflection
+
+Reflection mechanisms can significantly improve agent reliability by:
+
+1. Evaluating task completion and correctness
+2. Providing feedback for iterative improvement
+3. Enabling self-correction and learning
+
+While often LLM-based, reflection can also use deterministic methods. For instance, in coding tasks, compilation errors can serve as feedback. This approach is demonstrated in [this video using LangGraph for self-corrective code generation](https://www.youtube.com/watch?v=MvNdgmM7uyc).
+```
+

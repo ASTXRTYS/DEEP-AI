@@ -13,8 +13,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-from requests import exceptions as requests_exceptions
-
 from .thread_store import ThreadStore, ThreadStoreCorruptError, ThreadStoreData
 
 if TYPE_CHECKING:
@@ -301,6 +299,7 @@ class ThreadManager:
 
     def update_thread_metadata(self, thread_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         """Merge updates into the thread's metadata block and return the result."""
+
         with self.store.edit() as data:
             thread = next((thread for thread in data.threads if thread["id"] == thread_id), None)
             if not thread:
@@ -319,23 +318,8 @@ class ThreadManager:
                 raise ValueError(msg)
             thread["name"] = new_name
 
-    def delete_thread(self, thread_id: str, agent: CompiledGraph | None = None) -> None:
-        """Delete a thread and its checkpoints via server API.
-
-        Args:
-            thread_id: Thread ID to delete
-            agent: Agent instance (optional, only used for local fallback)
-
-        Raises:
-            ValueError: If trying to delete current thread or thread not found
-            LangGraphError: If server request fails
-        """
-        from .server_client import (
-            LangGraphError,
-            LangGraphTimeoutError,
-            delete_thread_on_server,
-        )
-
+    def delete_thread(self, thread_id: str, agent: CompiledGraph) -> None:
+        """Delete a thread and its checkpoints."""
         current_id = self.get_current_thread_id()
         if thread_id == current_id:
             msg = (
@@ -351,33 +335,12 @@ class ThreadManager:
             msg = f"Thread '{thread_id}' not found. Available threads: {', '.join(available)}"
             raise ValueError(msg)
 
-        # Delete via server API (primary method). If the server appears offline (timeout or failure to
-        # connect), fall back to deleting only from the local checkpointer so the CLI stays usable.
         try:
-            delete_thread_on_server(thread_id)
-        except LangGraphError as exc:
-            cause = getattr(exc, "__cause__", None)
-            server_unreachable = isinstance(exc, LangGraphTimeoutError) or isinstance(
-                cause, requests_exceptions.ConnectionError
-            )
-            if not server_unreachable:
-                msg = f"Failed to delete thread on server: {exc}"
-                raise ValueError(msg) from exc
+            agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Checkpointer may not expose delete_thread (e.g., remote deployments)
+            pass
 
-        # Always attempt to remove checkpoints from the local checkpointer when available. This keeps
-        # the CLI and LangGraph storage in sync (and still cleans up even when the server call failed
-        # above due to connectivity).
-        if agent:
-            try:
-                agent.checkpointer.delete_thread(thread_id)  # type: ignore[attr-defined]
-            except AttributeError:
-                # Checkpointer may not expose delete_thread
-                pass
-            except Exception:
-                # Ignore other checkpointer errors so metadata cleanup still proceeds.
-                pass
-
-        # Update local metadata
         with self.store.edit() as editable:
             editable.threads = [t for t in editable.threads if t["id"] != thread_id]
             if editable.current_thread_id == thread_id:

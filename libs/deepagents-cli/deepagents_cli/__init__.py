@@ -1,33 +1,21 @@
-"""DeepAgents CLI - Interactive AI coding assistant."""
+"""DeepAgents CLI - Interactive AI coding assistant.
 
-from __future__ import annotations
+The CLI has a broad set of optional dependencies. Importing :mod:`deepagents_cli`
+should *not* require those extras up front (e.g., when LangGraph loads the
+package just to build the agent graph). To keep import-time side effects light,
+`cli_main` is loaded lazily the first time it is called.
+"""
 
-import sys
-from pathlib import Path
+from typing import Any
 
+from deepagents_cli._bootstrap import ensure_workspace_on_path
 
-def _ensure_workspace_on_path() -> None:
-    """Add the monorepo root/libs to sys.path when running from sources."""
-    current = Path(__file__).resolve()
-    workspace_root = None
-
-    for parent in current.parents:
-        if (parent / "pyproject.toml").exists() and (parent / "libs").exists():
-            workspace_root = parent  # favor the outermost workspace (monorepo root)
-
-    if workspace_root is None:
-        return
-
-    root_str = str(workspace_root)
-    libs_str = str(workspace_root / "libs")
-
-    for path in (libs_str, root_str):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-_ensure_workspace_on_path()
-
-from .main import cli_main
+ensure_workspace_on_path()
 
 __all__ = ["cli_main"]
+
+
+def cli_main(*args: Any, **kwargs: Any):  # pragma: no cover - thin wrapper
+    from deepagents_cli.main import cli_main as _cli_main
+
+    return _cli_main(*args, **kwargs)

@@ -8,44 +8,21 @@ Usage:
 """
 
 import os
-import sys
 from pathlib import Path
 
+from deepagents_cli._bootstrap import ensure_workspace_on_path
 
-def _ensure_workspace_on_path() -> None:
-    """Ensure monorepo root + libs are available for server imports."""
-    current = Path(__file__).resolve()
-    workspace_root = None
+ensure_workspace_on_path()
 
-    for parent in current.parents:
-        if (parent / "pyproject.toml").exists() and (parent / "libs").exists():
-            workspace_root = parent  # keep walking to capture the outermost workspace
-
-    if workspace_root is None:
-        return
-
-    root_str = str(workspace_root)
-    libs_str = str(workspace_root / "libs")
-    for path in (libs_str, root_str):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-_ensure_workspace_on_path()
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.middleware import (
-    HandoffCleanupMiddleware,
-    HandoffToolMiddleware,
-)
-from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
-from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from langchain.agents.middleware import HostExecutionPolicy
 from langchain_anthropic import ChatAnthropic
 
 from deepagents_cli.agent_memory import AgentMemoryMiddleware
+from deepagents_cli.middleware_stack import build_handoff_middleware_stack
 from deepagents_cli.resumable_shell_async import AsyncResumableShellToolMiddleware
 from deepagents_cli.tools import http_request, tavily_client, web_search
 
@@ -106,19 +83,8 @@ backend = CompositeBackend(default=FilesystemBackend(), routes={"/memories/": lo
 agent_middleware = [
     AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
     shell_middleware,
-    # Handoff middleware stack (order matters for after_model execution!)
-    # CRITICAL: after_model() hooks execute in REVERSE order (last-to-first)
-    # Reference: https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L1395-1410
-    HandoffToolMiddleware(),  # Provides request_handoff tool (no after_model hook)
-    # Listed in REVERSE of execution order for after_model():
-    HandoffApprovalMiddleware(
-        model=model
-    ),  # after_model() executes SECOND (reads proposal, interrupts, refines)
-    HandoffSummarizationMiddleware(
-        model=model
-    ),  # after_model() executes FIRST (generates proposal)
-    HandoffCleanupMiddleware(),  # after_agent() hook for cleanup
 ]
+agent_middleware.extend(build_handoff_middleware_stack(model))
 
 # Create agent WITHOUT checkpointer/store (server provides these)
 # IMPORTANT: LangGraph server v0.4.20 EXPLICITLY REJECTS custom checkpointers

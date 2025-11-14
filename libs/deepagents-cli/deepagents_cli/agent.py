@@ -7,19 +7,18 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.middleware import (
-    HandoffCleanupMiddleware,
-    HandoffToolMiddleware,
-)
-from deepagents.middleware.handoff_approval import HandoffApprovalMiddleware
-from deepagents.middleware.handoff_summarization import HandoffSummarizationMiddleware
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.store.postgres import PostgresStore
+from langchain.tools import BaseTool
+from langchain_core.language_models import BaseChatModel
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.pregel import Pregel
+from langgraph.types import Checkpointer
 
-from .agent_memory import AgentMemoryMiddleware
-from .config import COLORS, config, console, get_default_coding_instructions
+from deepagents_cli.agent_memory import AgentMemoryMiddleware
+from deepagents_cli.backends_compat import SandboxBackendProtocol
+from deepagents_cli.config import COLORS, config, console, get_default_coding_instructions
+from deepagents_cli.middleware_stack import build_handoff_middleware_stack
 
 
 def list_agents() -> None:
@@ -86,17 +85,44 @@ def reset_agent(agent_name: str, source_agent: str | None = None) -> None:
     console.print(f"Location: {agent_dir}\n", style=COLORS["dim"])
 
 
-def get_system_prompt() -> str:
+def get_system_prompt(sandbox_type: str | None = None) -> str:
     """Get the base system prompt for the agent.
+
+    Args:
+        sandbox_type: Type of sandbox provider ("modal", "runloop", "daytona").
+                     If None, agent is operating in local mode.
 
     Returns:
         The system prompt string (without agent.md content)
     """
-    return f"""### Current Working Directory
+    if sandbox_type:
+        # Get provider-specific working directory
+        from deepagents_cli.integrations.sandbox_factory import get_default_working_dir
+
+        working_dir = get_default_working_dir(sandbox_type)
+
+        working_dir_section = f"""### Current Working Directory
+
+You are operating in a **remote Linux sandbox** at `{working_dir}`.
+
+All code execution and file operations happen in this sandbox environment.
+
+**Important:**
+- The CLI is running locally on the user's machine, but you execute code remotely
+- Use `{working_dir}` as your working directory for all operations
+- The local `/memories/` directory is still accessible for persistent storage
+
+"""
+    else:
+        working_dir_section = f"""### Current Working Directory
 
 The filesystem backend is currently operating in: `{Path.cwd()}`
 
-### Memory System Reminder
+"""
+
+    return (
+        working_dir_section
+        + """### Memory System Reminder
 
 Your long-term memory is stored in /memories/ and persists across sessions.
 
@@ -117,19 +143,9 @@ Some tool calls require user approval before execution. When a tool call is reje
 
 Respect the user's decisions and work with them collaboratively.
 
-### Web Search and HTTP Request Tools
+### Web Search Tool Usage
 
-**For research, documentation, or web content**: ALWAYS use `web_search`
-- Researching topics or technologies
-- Finding documentation or guides
-- Getting current information
-- web_search returns clean, summarized results optimized for research
-
-**For API calls**: Use `http_request` ONLY for JSON REST APIs
-- NOT for web pages, HTML, or documentation
-- ONLY for programmatic API endpoints (e.g., api.github.com, api.example.com)
-
-When you use web_search:
+When you use the web_search tool:
 1. The tool will return search results with titles, URLs, and content excerpts
 2. You MUST read and process these results, then respond naturally to the user
 3. NEVER show raw JSON or tool results directly to the user
@@ -153,50 +169,32 @@ When using the write_todos tool:
 6. Update todo status promptly as you complete each item
 
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
+    )
 
 
-def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer=None):
+def create_agent_with_config(
+    model: str | BaseChatModel,
+    assistant_id: str,
+    tools: list[BaseTool],
+    *,
+    checkpointer: Checkpointer | None = None,
+    sandbox: SandboxBackendProtocol | None = None,
+    sandbox_type: str | None = None,
+) -> tuple[Pregel, CompositeBackend]:
     """Create and configure an agent with the specified model and tools.
 
     Args:
-        model: The LLM model instance (e.g., ChatAnthropic).
-        assistant_id: Unique agent identifier (used for file organization).
-        tools: List of tools available to the agent.
-        checkpointer: Optional pre-initialized checkpointer.
-                     - If None: Creates default SqliteSaver fallback (see WARNING below)
-                     - If AsyncSqliteSaver: Use for async CLI (via main.py context manager)
-                     - If InMemorySaver: Use for unit tests
-                     - If ServerCheckpointer: Server runtime injects this
-                     Server exports should pass checkpointer=None (server injects its own).
+        model: LLM model to use
+        assistant_id: Agent identifier for memory storage
+        tools: Additional tools to provide to agent
+        sandbox: Optional sandbox backend for remote execution (e.g., ModalBackend).
+                 If None, uses local filesystem + shell.
+        sandbox_type: Type of sandbox provider ("modal", "runloop", "daytona")
 
     Returns:
-        Compiled agent graph with configured middleware and persistence.
-
-    WARNING - Sync Checkpointer Fallback (Issue #40):
-        The fallback when checkpointer=None creates a SYNCHRONOUS SqliteSaver.
-        This is INCOMPATIBLE with the async execution path (agent.astream() in execution.py).
-
-        According to LangGraph documentation:
-        - SqliteSaver does NOT support async methods (aget_tuple, alist, aput)
-        - Calling async methods on SqliteSaver raises NotImplementedError
-        - AsyncSqliteSaver is REQUIRED for async graph execution methods
-
-        Current Usage Patterns (Fallback Never Triggered):
-        1. CLI (main.py): ALWAYS passes AsyncSqliteSaver via context manager
-        2. Server (graph.py): Passes NO checkpointer (server injects its own)
-        3. Tests: Use mock checkpointers (DummyCheckpointer in test_thread_manager.py)
-
-        This fallback exists for defensive programming but would FAIL if ever triggered
-        because all execution paths use async methods. Consider either:
-        A) Removing the fallback entirely (fail fast if checkpointer missing)
-        B) Creating AsyncSqliteSaver fallback (requires async context)
-        C) Documenting this is dead code for historical/safety reasons
+        2-tuple of graph and backend
     """
-    shell_middleware = ResumableShellToolMiddleware(
-        workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
-    )
-
-    # For long-term memory, point to ~/.deepagents/AGENT_NAME/ with /memories/ prefix
+    # Setup agent directory for persistent memory (same for both local and remote modes)
     agent_dir = Path.home() / ".deepagents" / assistant_id
     agent_dir.mkdir(parents=True, exist_ok=True)
     agent_md = agent_dir / "agent.md"
@@ -204,75 +202,46 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         source_content = get_default_coding_instructions()
         agent_md.write_text(source_content)
 
-    # Set up persistent checkpointing for short-term memory (conversations)
-    # Only create default SqliteSaver if no checkpointer was provided
-    if checkpointer is None:
-        import sqlite3
-
-        # IMPORTANT: This creates a SYNCHRONOUS SqliteSaver as a fallback.
-        # This is INCOMPATIBLE with async execution (agent.astream() in execution.py).
-        # In practice, this fallback is NEVER triggered because:
-        # - CLI always passes AsyncSqliteSaver (main.py line 271)
-        # - Server never passes checkpointer (graph.py line 117)
-        # - Tests use mock checkpointers
-        #
-        # This code exists for defensive programming but would fail if used.
-        # See docstring WARNING above for full explanation and potential fixes.
-        checkpoint_db = agent_dir / "checkpoints.db"
-        # Direct construction - proper way for long-running applications
-        conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-
-        # Initialize checkpointer schema if needed (first time setup)
-        try:
-            checkpointer.setup()
-        except Exception:
-            pass  # Already set up
-
-    # Set up PostgreSQL store for cross-conversation long-term memory
-    import psycopg
-
-    database_url = os.environ.get("DEEPAGENTS_DATABASE_URL", "postgresql://localhost/deepagents")
-    # Direct construction for long-running applications
-    pg_conn = psycopg.connect(database_url, autocommit=True)
-    store = PostgresStore(pg_conn)
-
-    # Initialize store schema if needed (first time setup)
-    try:
-        store.setup()
-    except Exception:
-        pass  # Already set up
-
-    # Long-term backend - rooted at agent directory
-    # This handles both /memories/ files and /agent.md
+    # Long-term backend for /memories/ route (always local, persists across sessions)
     long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
 
-    # Composite backend: current working directory for default, agent directory for /memories/
-    backend = CompositeBackend(
-        default=FilesystemBackend(), routes={"/memories/": long_term_backend}
-    )
+    # CONDITIONAL SETUP: Local vs Remote Sandbox
+    if sandbox is None:
+        # ========== LOCAL MODE (current behavior) ==========
+        # Backend: Local filesystem for code + local /memories/
+        composite_backend = CompositeBackend(
+            default=FilesystemBackend(),  # Current working directory
+            routes={"/memories/": long_term_backend},  # Agent memories
+        )
 
-    # Custom middleware for CLI-specific features
-    # CRITICAL: after_model() hooks execute in REVERSE order (last-to-first)
-    # The middleware listed LAST will have its after_model() execute FIRST
-    # Reference: https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L1395-1410
-    agent_middleware = [
-        AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
-        shell_middleware,
-        # Handoff middleware stack (order matters for after_model execution!)
-        HandoffToolMiddleware(),  # Provides request_handoff tool (no after_model hook)
-        # Listed in REVERSE of execution order for after_model():
-        HandoffApprovalMiddleware(
-            model=model
-        ),  # after_model() executes SECOND (reads proposal, interrupts, refines)
-        HandoffSummarizationMiddleware(
-            model=model
-        ),  # after_model() executes FIRST (generates proposal)
-        HandoffCleanupMiddleware(),  # after_agent() hook for cleanup
-    ]
+        # Middleware: ResumableShellToolMiddleware provides "shell" tool
+        agent_middleware = [
+            AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
+            ResumableShellToolMiddleware(
+                workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
+            ),
+        ]
+    else:
+        # ========== REMOTE SANDBOX MODE ==========
+        # Backend: Remote sandbox for code + local /memories/
+        composite_backend = CompositeBackend(
+            default=sandbox,  # Remote sandbox (ModalBackend, etc.)
+            routes={"/memories/": long_term_backend},  # Agent memories (still local!)
+        )
 
-    # Get the system prompt
-    system_prompt = get_system_prompt()
+        # Middleware: create_deep_agent automatically provides file tools + execute
+        # when a SandboxBackend is passed, so we only add AgentMemoryMiddleware
+        agent_middleware = [
+            AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
+        ]
+        # NOTE: File operations (ls, read, write, edit, glob, grep) and execute tool
+        # are automatically provided by create_deep_agent when backend is a SandboxBackend.
+        # No need to add FilesystemMiddleware or ShellToolMiddleware manually.
+
+    agent_middleware.extend(build_handoff_middleware_stack(model))
+
+    # Get the system prompt (sandbox-aware)
+    system_prompt = get_system_prompt(sandbox_type=sandbox_type)
 
     # Helper functions for formatting tool descriptions in HITL prompts
     def format_write_file_description(tool_call: dict) -> str:
@@ -305,6 +274,16 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
 
         return f"Query: {query}\nMax results: {max_results}\n\n⚠️  This will use Tavily API credits"
 
+    def format_fetch_url_description(tool_call: dict) -> str:
+        """Format fetch_url tool call for approval prompt."""
+        args = tool_call.get("args", {})
+        url = args.get("url", "unknown")
+        timeout = args.get("timeout", 30)
+
+        return (
+            f"URL: {url}\nTimeout: {timeout}s\n\n⚠️  Will fetch and convert web content to markdown"
+        )
+
     def format_task_description(tool_call: dict) -> str:
         """Format task (subagent) tool call for approval prompt."""
         args = tool_call.get("args", {})
@@ -334,6 +313,13 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         ),
     }
 
+    execute_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: (
+            f"Execute Command: {tool_call['args'].get('command', 'N/A')}\nLocation: Remote Sandbox"
+        ),
+    }
+
     write_file_interrupt_config: InterruptOnConfig = {
         "allowed_decisions": ["approve", "reject"],
         "description": lambda tool_call, state, runtime: format_write_file_description(tool_call),
@@ -349,24 +335,34 @@ def create_agent_with_config(model, assistant_id: str, tools: list, checkpointer
         "description": lambda tool_call, state, runtime: format_web_search_description(tool_call),
     }
 
+    fetch_url_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: format_fetch_url_description(tool_call),
+    }
+
     task_interrupt_config: InterruptOnConfig = {
         "allowed_decisions": ["approve", "reject"],
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
-    return create_deep_agent(
+    resolved_checkpointer = checkpointer or InMemorySaver()
+
+    agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
-        backend=backend,
+        backend=composite_backend,
         middleware=agent_middleware,
-        checkpointer=checkpointer,
-        store=store,
         interrupt_on={
             "shell": shell_interrupt_config,
+            "execute": execute_interrupt_config,
             "write_file": write_file_interrupt_config,
             "edit_file": edit_file_interrupt_config,
             "web_search": web_search_interrupt_config,
+            "fetch_url": fetch_url_interrupt_config,
             "task": task_interrupt_config,
         },
+        checkpointer=resolved_checkpointer,
     ).with_config(config)
+
+    return agent, composite_backend

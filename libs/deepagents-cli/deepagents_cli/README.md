@@ -185,6 +185,16 @@ uv pip install -e .
 deepagents
 ```
 
+## Entry Point
+
+The CLI is registered in `pyproject.toml` as:
+```toml
+[project.scripts]
+deepagents = "deepagents.cli:cli_main"
+```
+
+This means when users install the package, they can run `deepagents` directly.
+
 ## Handoff architecture
 
 The CLI supports two complementary handoff flows that **share the same helpers** but have
@@ -239,13 +249,3 @@ This division of responsibilities keeps:
 - manual `/handoff` UX **in the CLI**,
 - summarization + human-in-the-loop review **in one middleware + interrupt**, and
 - persistence/cleanup **centralized in `handoff_persistence` + cleanup middleware**.
-
-## Entry Point
-
-The CLI is registered in `pyproject.toml` as:
-```toml
-[project.scripts]
-deepagents = "deepagents.cli:cli_main"
-```
-
-This means when users install the package, they can run `deepagents` directly.

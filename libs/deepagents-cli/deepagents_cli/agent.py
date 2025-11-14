@@ -7,16 +7,18 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.backends.sandbox import SandboxBackendProtocol
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
 from langchain.tools import BaseTool
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.pregel import Pregel
+from langgraph.types import Checkpointer
 
 from deepagents_cli.agent_memory import AgentMemoryMiddleware
+from deepagents_cli.backends_compat import SandboxBackendProtocol
 from deepagents_cli.config import COLORS, config, console, get_default_coding_instructions
+from deepagents_cli.middleware_stack import build_handoff_middleware_stack
 
 
 def list_agents() -> None:
@@ -175,6 +177,7 @@ def create_agent_with_config(
     assistant_id: str,
     tools: list[BaseTool],
     *,
+    checkpointer: Checkpointer | None = None,
     sandbox: SandboxBackendProtocol | None = None,
     sandbox_type: str | None = None,
 ) -> tuple[Pregel, CompositeBackend]:
@@ -234,6 +237,8 @@ def create_agent_with_config(
         # NOTE: File operations (ls, read, write, edit, glob, grep) and execute tool
         # are automatically provided by create_deep_agent when backend is a SandboxBackend.
         # No need to add FilesystemMiddleware or ShellToolMiddleware manually.
+
+    agent_middleware.extend(build_handoff_middleware_stack(model))
 
     # Get the system prompt (sandbox-aware)
     system_prompt = get_system_prompt(sandbox_type=sandbox_type)
@@ -340,6 +345,8 @@ def create_agent_with_config(
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
+    resolved_checkpointer = checkpointer or InMemorySaver()
+
     agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
@@ -355,8 +362,7 @@ def create_agent_with_config(
             "fetch_url": fetch_url_interrupt_config,
             "task": task_interrupt_config,
         },
+        checkpointer=resolved_checkpointer,
     ).with_config(config)
-
-    agent.checkpointer = InMemorySaver()
 
     return agent, composite_backend

@@ -10,8 +10,7 @@ except ImportError:
 
 import os
 
-from deepagents.backends.protocol import ExecuteResponse
-from deepagents.backends.sandbox import BaseSandbox
+from deepagents_cli.backends_compat import BaseSandbox, ExecuteResponse
 from runloop_api_client import Runloop
 
 

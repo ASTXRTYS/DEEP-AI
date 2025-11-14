@@ -1,0 +1,981 @@
+# DeepWiki Q&A with Code Context for Repository: ASTXRTYS/index
+
+
+## Q1
+
+I'm making modifications to the Deep Agent CLI, specifically around a couple of different factors, and I will list them now.
+
+What I'm going to be adding is a custom middleware for summarization that can be manually triggered via a custom slash command named "handoff." The purpose for this "handoff" command is so that users can manually trigger a summarization when the agent's context is growing too large. So they can summarize the last five to ten messages for the purpose of summarizing conversational context purely, so that when the new thread is spawned, it feels seamless.
+
+Long-term memory is already preserved via the agent's MD and agent memory Python and agent memory middleware. So the purpose for this "handoff" command and summarization is purely for a seamless transition of conversational summary.
+
+And the plan here is to have that memory triggered, that summary that gets generated from the custom slash command, gets put into the agent MD file via a specific memory block, just for that. And then after the first one to three turns in the new thread, that block gets cleaned up via another middleware, I suppose.
+
+My question to you is, what is the best way to implement this inside of the Deep Agent CLI? Where is middleware appropriate? Where is it not appropriate? Is it appropriate and best suited for everything I mentioned? What guidance can you provide?
+
+
+### Answer
+
+Based on my analysis of the Deep Agent CLI codebase, here's my guidance on implementing the "handoff" command:
+
+## Where Middleware is **NOT** Appropriate
+
+**1. The `/handoff` Slash Command Itself**
+
+Slash commands should be handled directly in the command routing system, not through middleware. The CLI has a dedicated command handling architecture: index:12-48 index:153-161 
+
+You should add your `handoff` command handler to `commands.py` alongside the existing commands like `/clear`, `/help`, etc., and register it in the `COMMANDS` dictionary: index:40-46 
+
+**2. Summarization Logic in the Command Handler**
+
+The actual summarization should happen directly in your command handler, not through middleware. You can follow the pattern from the existing `SummarizationMiddleware` but invoke it synchronously: index:221-234 
+
+**3. Writing to agent.md**
+
+Writing the summary to the agent.md file should use the backend system directly, not middleware. The `AgentMemoryMiddleware` shows how to read from agent.md using the backend: index:144-147 
+
+You should use the same backend's `write()` method to update the agent.md file with your summary block. The backend is already configured in the agent creation: index:155-162 
+
+## Where Middleware **IS** Appropriate
+
+**The Cleanup After 1-3 Turns**
+
+This is the perfect use case for middleware. You should create a custom middleware that:
+- Tracks the number of turns since the handoff
+- Runs on `before_model` or `after_model` hooks to check turn count
+- Removes the handoff summary block from agent.md after the threshold
+
+The middleware lifecycle hooks are designed exactly for this: index:234-248 
+
+Your cleanup middleware would use `before_model` since it runs before each model invocation, allowing you to track turns and modify state: index:652-711 
+
+## Implementation Recommendations
+
+**1. Command Handler Structure:**
+```python
+# In commands.py
+def handle_handoff_command(agent, messages_to_summarize=10):
+    # 1. Extract last N messages from agent state
+    # 2. Generate summary using LLM (similar to SummarizationMiddleware)
+    # 3. Write summary to agent.md via backend
+    # 4. Initialize turn counter in state for cleanup middleware
+    # 5. Optionally reset conversation with /clear
+```
+
+**2. State Management for Cleanup:**
+
+Extend the agent state to track handoff metadata: index:15-19 
+
+**3. Cleanup Middleware:**
+
+Create a middleware class that:
+- Has a custom `state_schema` extending `AgentMemoryState`
+- Implements `before_model` to check turn count
+- Cleans up the summary block when threshold is reached
+- Can be added to the middleware list: index:165-168 
+
+## Notes
+
+**Why This Division?**
+- **Commands are for user-initiated actions** - They respond to user input and don't run automatically in the agent loop
+- **Middleware is for agent lifecycle hooks** - They run automatically at specific points (before/after model calls, before/after agent execution)
+- **Backends are for data persistence** - They handle reading/writing to the filesystem
+
+**Alternative Approach:**
+Instead of using middleware for cleanup, you could also use `after_model` hooks with a decorator: index:797-848 
+
+This would give you a lighter-weight implementation without a full middleware class.
+
+**Integration with Existing Memory System:**
+
+The existing `AgentMemoryMiddleware` already injects agent.md content into the system prompt via `wrap_model_call`: index:168-196 
+
+Your handoff summary block will automatically be included in the system prompt on subsequent turns, and your cleanup middleware will remove it after the specified number of turns.
+
+
+### Citations
+
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/commands.py (L12-48)
+
+```python
+def handle_command(command: str, agent, token_tracker: TokenTracker) -> str | bool:
+    """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
+    cmd = command.lower().strip().lstrip("/")
+
+    if cmd in ["quit", "exit", "q"]:
+        return "exit"
+
+    if cmd == "clear":
+        # Reset agent conversation state
+        agent.checkpointer = InMemorySaver()
+
+        # Reset token tracking to baseline
+        token_tracker.reset()
+
+        # Clear screen and show fresh UI
+        console.clear()
+        console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+        console.print()
+        console.print(
+            "... Fresh start! Screen cleared and conversation reset.", style=COLORS["agent"]
+        )
+        console.print()
+        return True
+
+    if cmd == "help":
+        show_interactive_help()
+        return True
+
+    if cmd == "tokens":
+        token_tracker.display_session()
+        return True
+
+    console.print()
+    console.print(f"[yellow]Unknown command: /{cmd}[/yellow]")
+    console.print("[dim]Type /help for available commands.[/dim]")
+    console.print()
+    return True
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/main.py (L153-161)
+
+```python
+        # Check for slash commands first
+        if user_input.startswith("/"):
+            result = handle_command(user_input, agent, token_tracker)
+            if result == "exit":
+                console.print("\nGoodbye!", style=COLORS["primary"])
+                break
+            if result:
+                # Command was handled, continue to next input
+                continue
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/config.py (L40-46)
+
+```python
+COMMANDS = {
+    "clear": "Clear screen and reset conversation",
+    "help": "Show help information",
+    "tokens": "Show token usage for current session",
+    "quit": "Exit the CLI",
+    "exit": "Exit the CLI",
+}
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/summarization.py (L221-234)
+
+```python
+    def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
+        """Generate summary for the given messages."""
+        if not messages_to_summarize:
+            return "No previous conversation history."
+
+        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed_messages:
+            return "Previous conversation was too long to summarize."
+
+        try:
+            response = self.model.invoke(self.summary_prompt.format(messages=trimmed_messages))
+            return cast("str", response.content).strip()
+        except Exception as e:  # noqa: BLE001
+            return f"Error generating summary: {e!s}"
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent_memory.py (L15-19)
+
+```python
+class AgentMemoryState(AgentState):
+    """State for the agent memory middleware."""
+
+    agent_memory: NotRequired[str | None]
+    """Long-term memory content for the agent."""
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent_memory.py (L144-147)
+
+```python
+        # Only load memory if it hasn't been loaded yet
+        if "agent_memory" not in state or state.get("agent_memory") is None:
+            file_data = self.backend.read(AGENT_MEMORY_FILE_PATH)
+            return {"agent_memory": file_data}
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent_memory.py (L168-196)
+
+```python
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Inject agent memory into the system prompt.
+
+        Args:
+            request: The model request being processed.
+            handler: The handler function to call with the modified request.
+
+        Returns:
+            The model response from the handler.
+        """
+        # Get agent memory from state
+        agent_memory = request.state.get("agent_memory", "")
+
+        memory_section = self.system_prompt_template.format(agent_memory=agent_memory)
+        if request.system_prompt:
+            request.system_prompt = memory_section + "\n\n" + request.system_prompt
+        else:
+            request.system_prompt = memory_section
+        request.system_prompt = (
+            request.system_prompt
+            + "\n\n"
+            + LONGTERM_MEMORY_SYSTEM_PROMPT.format(memory_path=self.memory_path)
+        )
+
+        return handler(request)
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent.py (L155-162)
+
+```python
+    # Long-term backend - rooted at agent directory
+    # This handles both /memories/ files and /agent.md
+    long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
+
+    # Composite backend: current working directory for default, agent directory for /memories/
+    backend = CompositeBackend(
+        default=FilesystemBackend(), routes={"/memories/": long_term_backend}
+    )
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent.py (L165-168)
+
+```python
+    agent_middleware = [
+        AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
+        shell_middleware,
+    ]
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/types.py (L234-248)
+
+```python
+    def before_model(self, state: StateT, runtime: Runtime[ContextT]) -> dict[str, Any] | None:
+        """Logic to run before the model is called."""
+
+    async def abefore_model(
+        self, state: StateT, runtime: Runtime[ContextT]
+    ) -> dict[str, Any] | None:
+        """Async logic to run before the model is called."""
+
+    def after_model(self, state: StateT, runtime: Runtime[ContextT]) -> dict[str, Any] | None:
+        """Logic to run after the model is called."""
+
+    async def aafter_model(
+        self, state: StateT, runtime: Runtime[ContextT]
+    ) -> dict[str, Any] | None:
+        """Async logic to run after the model is called."""
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/types.py (L652-711)
+
+```python
+def before_model(
+    func: _CallableWithStateAndRuntime[StateT, ContextT] | None = None,
+    *,
+    state_schema: type[StateT] | None = None,
+    tools: list[BaseTool] | None = None,
+    can_jump_to: list[JumpTo] | None = None,
+    name: str | None = None,
+) -> (
+    Callable[[_CallableWithStateAndRuntime[StateT, ContextT]], AgentMiddleware[StateT, ContextT]]
+    | AgentMiddleware[StateT, ContextT]
+):
+    """Decorator used to dynamically create a middleware with the `before_model` hook.
+
+    Args:
+        func: The function to be decorated.
+
+            Must accept: `state: StateT, runtime: Runtime[ContextT]` - State and runtime
+                context
+        state_schema: Optional custom state schema type.
+
+            If not provided, uses the default `AgentState` schema.
+        tools: Optional list of additional tools to register with this middleware.
+        can_jump_to: Optional list of valid jump destinations for conditional edges.
+
+            Valid values are: `'tools'`, `'model'`, `'end'`
+        name: Optional name for the generated middleware class.
+
+            If not provided, uses the decorated function's name.
+
+    Returns:
+        Either an `AgentMiddleware` instance (if func is provided directly) or a
+            decorator function that can be applied to a function it is wrapping.
+
+    The decorated function should return:
+
+    - `dict[str, Any]` - State updates to merge into the agent state
+    - `Command` - A command to control flow (e.g., jump to different node)
+    - `None` - No state updates or flow control
+
+    Examples:
+        ```python title="Basic usage"
+        @before_model
+        def log_before_model(state: AgentState, runtime: Runtime) -> None:
+            print(f"About to call model with {len(state['messages'])} messages")
+        ```
+
+        ```python title="With conditional jumping"
+        @before_model(can_jump_to=["end"])
+        def conditional_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+            if some_condition(state):
+                return {"jump_to": "end"}
+            return None
+        ```
+
+        ```python title="With custom state schema"
+        @before_model(state_schema=MyCustomState)
+        def custom_before_model(state: MyCustomState, runtime: Runtime) -> dict[str, Any]:
+            return {"custom_field": "updated_value"}
+        ```
+    """
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/types.py (L797-848)
+
+```python
+def after_model(
+    func: _CallableWithStateAndRuntime[StateT, ContextT] | None = None,
+    *,
+    state_schema: type[StateT] | None = None,
+    tools: list[BaseTool] | None = None,
+    can_jump_to: list[JumpTo] | None = None,
+    name: str | None = None,
+) -> (
+    Callable[[_CallableWithStateAndRuntime[StateT, ContextT]], AgentMiddleware[StateT, ContextT]]
+    | AgentMiddleware[StateT, ContextT]
+):
+    """Decorator used to dynamically create a middleware with the `after_model` hook.
+
+    Args:
+        func: The function to be decorated.
+
+            Must accept: `state: StateT, runtime: Runtime[ContextT]` - State and runtime
+            context
+        state_schema: Optional custom state schema type.
+
+            If not provided, uses the default `AgentState` schema.
+        tools: Optional list of additional tools to register with this middleware.
+        can_jump_to: Optional list of valid jump destinations for conditional edges.
+
+            Valid values are: `'tools'`, `'model'`, `'end'`
+        name: Optional name for the generated middleware class.
+
+            If not provided, uses the decorated function's name.
+
+    Returns:
+        Either an `AgentMiddleware` instance (if func is provided) or a decorator
+            function that can be applied to a function.
+
+    The decorated function should return:
+
+    - `dict[str, Any]` - State updates to merge into the agent state
+    - `Command` - A command to control flow (e.g., jump to different node)
+    - `None` - No state updates or flow control
+
+    Examples:
+        ```python title="Basic usage for logging model responses"
+        @after_model
+        def log_latest_message(state: AgentState, runtime: Runtime) -> None:
+            print(state["messages"][-1].content)
+        ```
+
+        ```python title="With custom state schema"
+        @after_model(state_schema=MyCustomState, name="MyAfterModelMiddleware")
+        def custom_after_model(state: MyCustomState, runtime: Runtime) -> dict[str, Any]:
+            return {"custom_field": "updated_after_model"}
+        ```
+    """
+```
+
+## Q2
+
+How will the iteration loop of the user refining the actual summarization? That loop where it's the user going back and forth with the agent to refine the summarization before it gets injected into the agent MD file. How will this be handled for example, and what is the best way to do so?
+
+
+### Answer
+
+Based on my analysis of the Deep Agent CLI codebase, I need to clarify that **the CLI does not currently implement a mechanism for users to interactively refine summarizations before they are persisted to the agent's memory**.
+
+Here's what the Deep Agent CLI actually implements:
+
+## Automatic Summarization (No User Refinement)
+
+The Deep Agent uses `SummarizationMiddleware` which **automatically** summarizes conversation history when token limits are approached, without user intervention: index:107-122 
+
+This middleware creates summaries automatically in the `before_model` hook without any interrupt or approval step: index:102-130 
+
+## Human-in-the-Loop for Tool Calls (Not Summarization)
+
+The CLI does implement human-in-the-loop approval for **tool calls** (like shell commands, file edits, web searches), using the `HumanInTheLoopMiddleware` with `interrupt()` and `Command`: index:224-266 
+
+The execution flow handles these interrupts and prompts for user approval: index:501-559 
+
+## Command Handlers
+
+The command handlers in `commands.py` only handle slash commands like `/clear`, `/help`, `/tokens`, and `/quit`: index:12-50 
+
+## Agent Memory Persistence
+
+The agent's long-term memory is stored in `agent.md` and loaded via `AgentMemoryMiddleware`, but the agent itself can edit this file using standard file editing tools - there's no special summarization refinement flow: index:82-108 
+
+## Notes
+
+The Deep Agent CLI's current architecture separates concerns:
+- **Automatic summarization** happens transparently when token limits are reached
+- **Human-in-the-loop approval** is used for potentially destructive tool calls
+- **Long-term memory** is stored in `agent.md` and can be edited by the agent using regular file editing tools
+
+If you need to implement user refinement of summarizations before persistence, you would need to create a custom middleware that combines the summarization logic with an interrupt-based approval flow similar to the HITL pattern used for tool calls.
+
+
+### Citations
+
+
+**File:** deepagents-master/libs/deepagents/graph.py (L107-122)
+
+```python
+                SummarizationMiddleware(
+                    model=model,
+                    max_tokens_before_summary=170000,
+                    messages_to_keep=6,
+                ),
+                AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+                PatchToolCallsMiddleware(),
+            ],
+            default_interrupt_on=interrupt_on,
+            general_purpose_agent=True,
+        ),
+        SummarizationMiddleware(
+            model=model,
+            max_tokens_before_summary=170000,
+            messages_to_keep=6,
+        ),
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/summarization.py (L102-130)
+
+```python
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:  # noqa: ARG002
+        """Process messages before model invocation, potentially triggering summarization."""
+        messages = state["messages"]
+        self._ensure_message_ids(messages)
+
+        total_tokens = self.token_counter(messages)
+        if (
+            self.max_tokens_before_summary is not None
+            and total_tokens < self.max_tokens_before_summary
+        ):
+            return None
+
+        cutoff_index = self._find_safe_cutoff(messages)
+
+        if cutoff_index <= 0:
+            return None
+
+        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
+
+        summary = self._create_summary(messages_to_summarize)
+        new_messages = self._build_new_messages(summary)
+
+        return {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *new_messages,
+                *preserved_messages,
+            ]
+        }
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent.py (L224-266)
+
+```python
+    # Configure human-in-the-loop for potentially destructive tools
+    shell_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: (
+            f"Shell Command: {tool_call['args'].get('command', 'N/A')}\n"
+            f"Working Directory: {os.getcwd()}"
+        ),
+    }
+
+    write_file_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: format_write_file_description(tool_call),
+    }
+
+    edit_file_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: format_edit_file_description(tool_call),
+    }
+
+    web_search_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: format_web_search_description(tool_call),
+    }
+
+    task_interrupt_config: InterruptOnConfig = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": lambda tool_call, state, runtime: format_task_description(tool_call),
+    }
+
+    agent = create_deep_agent(
+        model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        backend=backend,
+        middleware=agent_middleware,
+        interrupt_on={
+            "shell": shell_interrupt_config,
+            "write_file": write_file_interrupt_config,
+            "edit_file": edit_file_interrupt_config,
+            "web_search": web_search_interrupt_config,
+            "task": task_interrupt_config,
+        },
+    ).with_config(config)
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/execution.py (L501-559)
+
+```python
+            # Handle human-in-the-loop after stream completes
+            if interrupt_occurred and hitl_request:
+                # Check if auto-approve is enabled
+                if session_state.auto_approve:
+                    # Auto-approve all commands without prompting
+                    decisions = []
+                    for action_request in hitl_request.get("action_requests", []):
+                        # Show what's being auto-approved (brief, dim message)
+                        if spinner_active:
+                            status.stop()
+                            spinner_active = False
+
+                        description = action_request.get("description", "tool action")
+                        console.print()
+                        console.print(f"  [dim]⚡ {description}[/dim]")
+
+                        decisions.append({"type": "approve"})
+
+                    hitl_response = {"decisions": decisions}
+
+                    # Restart spinner for continuation
+                    if not spinner_active:
+                        status.start()
+                        spinner_active = True
+                else:
+                    # Normal HITL flow - stop spinner and prompt user
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+
+                    # Handle human-in-the-loop approval
+                    decisions = []
+                    for action_request in hitl_request.get("action_requests", []):
+                        decision = await asyncio.to_thread(
+                            prompt_for_tool_approval,
+                            action_request,
+                            assistant_id,
+                        )
+                        decisions.append(decision)
+
+                    suppress_resumed_output = any(
+                        decision.get("type") == "reject" for decision in decisions
+                    )
+                    hitl_response = {"decisions": decisions}
+
+            if interrupt_occurred and hitl_response:
+                if suppress_resumed_output:
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+
+                    console.print("[yellow]Command rejected.[/yellow]", style="bold")
+                    console.print("Tell the agent what you'd like to do differently.")
+                    console.print()
+                    return
+
+                # Resume the agent with the human decision
+                stream_input = Command(resume=hitl_response)
+                # Continue the while loop to restream
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/commands.py (L12-50)
+
+```python
+def handle_command(command: str, agent, token_tracker: TokenTracker) -> str | bool:
+    """Handle slash commands. Returns 'exit' to exit, True if handled, False to pass to agent."""
+    cmd = command.lower().strip().lstrip("/")
+
+    if cmd in ["quit", "exit", "q"]:
+        return "exit"
+
+    if cmd == "clear":
+        # Reset agent conversation state
+        agent.checkpointer = InMemorySaver()
+
+        # Reset token tracking to baseline
+        token_tracker.reset()
+
+        # Clear screen and show fresh UI
+        console.clear()
+        console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+        console.print()
+        console.print(
+            "... Fresh start! Screen cleared and conversation reset.", style=COLORS["agent"]
+        )
+        console.print()
+        return True
+
+    if cmd == "help":
+        show_interactive_help()
+        return True
+
+    if cmd == "tokens":
+        token_tracker.display_session()
+        return True
+
+    console.print()
+    console.print(f"[yellow]Unknown command: /{cmd}[/yellow]")
+    console.print("[dim]Type /help for available commands.[/dim]")
+    console.print()
+    return True
+
+    return False
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent_memory.py (L82-108)
+
+```python
+class AgentMemoryMiddleware(AgentMiddleware):
+    """Middleware for loading agent-specific long-term memory.
+
+    This middleware loads the agent's long-term memory from a file (agent.md)
+    and injects it into the system prompt. The memory is loaded once at the
+    start of the conversation and stored in state.
+
+    Args:
+        backend: Backend to use for loading the agent memory file.
+        system_prompt_template: Optional custom template for how to inject
+            the agent memory into the system prompt. Use {agent_memory} as
+            a placeholder. Defaults to a simple section header.
+
+    Example:
+        ```python
+        from deepagents.middleware.agent_memory import AgentMemoryMiddleware
+        from deepagents.memory.backends import FilesystemBackend
+        from pathlib import Path
+
+        # Set up backend pointing to agent's directory
+        agent_dir = Path.home() / ".deepagents" / "my-agent"
+        backend = FilesystemBackend(root_dir=agent_dir)
+
+        # Create middleware
+        middleware = AgentMemoryMiddleware(backend=backend)
+        ```
+    """
+```
+
+## Q3
+
+So you're suggesting to make just one piece of middleware. So it's the SummarizationMiddleware, and this SummarizationMiddleware will have an interrupt mechanism where the user can refine the summarization, and then it loops back to the actual summarization logic. Is that what you're saying? And if so, can you show me what the spec for this would look like? Could you design the middleware?
+
+
+### Answer
+
+Based on the codebase, here's how you would design a custom middleware that combines summarization logic with an interrupt mechanism for user refinement:
+
+## Architecture Overview
+
+The custom middleware would follow the same pattern as the existing `HumanInTheLoopMiddleware` and `SummarizationMiddleware`, implementing the `AgentMiddleware` base class. The key is to use the `before_model` hook for summarization logic and LangGraph's `interrupt()` function for user refinement. index:205-224 
+
+## Design Pattern
+
+### 1. **Summarization Detection (before_model hook)**
+
+Similar to `SummarizationMiddleware`, your middleware would:
+- Monitor token counts in the `before_model` hook
+- Detect when summarization is needed based on thresholds
+- Generate a draft summary using an LLM index:102-130 
+
+### 2. **Interrupt for User Refinement**
+
+Instead of immediately persisting the summary, you would use `interrupt()` similar to how `HumanInTheLoopMiddleware` works: index:327-329 
+
+### 3. **Request/Response Structure**
+
+Create TypedDict structures similar to HITL's `HITLRequest` and `HITLResponse`: index:52-100 
+
+For your summarization middleware, you would define:
+- `SummarizationRequest`: Contains the draft summary, messages being summarized, and metadata
+- `SummarizationResponse`: Contains user decisions (approve, edit with new summary text, or regenerate)
+- Decision types: `approve`, `edit`, `regenerate`
+
+### 4. **Implementation Structure**
+
+```python
+class SummarizationWithReviewMiddleware(AgentMiddleware):
+    def __init__(
+        self,
+        model: str | BaseChatModel,
+        max_tokens_before_summary: int,
+        allowed_decisions: list[Literal["approve", "edit", "regenerate"]] = ["approve", "edit", "regenerate"]
+    ):
+        # Initialize similar to both SummarizationMiddleware and HumanInTheLoopMiddleware
+        
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        # 1. Check if summarization is needed (token threshold)
+        # 2. Generate draft summary
+        # 3. Create interrupt request with draft summary
+        # 4. Call interrupt() to pause for user review
+        # 5. Process user decision (approve/edit/regenerate)
+        # 6. Return state updates with final summary
+```
+
+### 5. **Decision Processing**
+
+Similar to how HITL processes decisions: index:238-278 
+
+Your middleware would process:
+- **Approve**: Use the draft summary as-is
+- **Edit**: Use the user's edited summary text
+- **Regenerate**: Generate a new summary with different instructions
+
+### 6. **State Updates**
+
+After receiving user feedback, update the state using `RemoveMessage` to replace old messages with the approved summary: index:124-130 
+
+### 7. **Integration with Deep Agent CLI**
+
+To use this middleware in the CLI, you would add it to the middleware list when creating the agent: index:165-168 
+
+### 8. **Resuming After Interrupt**
+
+The agent would be resumed using `Command(resume=...)` with the user's decision: index:60-65 
+
+## Key Design Considerations
+
+1. **Hook Selection**: Use `before_model` (not `after_model`) since summarization needs to happen before the model sees the messages
+2. **Interrupt Timing**: Call `interrupt()` within the `before_model` hook after generating the draft summary
+3. **State Management**: Ensure proper message ID management for the `add_messages` reducer
+4. **Checkpointer Required**: The agent must use a checkpointer for interrupt/resume to work properly index:18-22 
+
+## Notes
+
+- The middleware combines the token monitoring logic from `SummarizationMiddleware` with the interrupt pattern from `HumanInTheLoopMiddleware`
+- Unlike tool call interrupts (which use `after_model`), summarization interrupts must use `before_model` since they need to modify the messages before the model sees them
+- The user can iteratively refine by choosing "regenerate" with different instructions, creating a feedback loop
+- This pattern ensures summaries are human-approved before being persisted, maintaining context quality
+
+
+### Citations
+
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/types.py (L205-224)
+
+```python
+class AgentMiddleware(Generic[StateT, ContextT]):
+    """Base middleware class for an agent.
+
+    Subclass this and implement any of the defined methods to customize agent behavior
+    between steps in the main agent loop.
+    """
+
+    state_schema: type[StateT] = cast("type[StateT]", AgentState)
+    """The schema for state passed to the middleware nodes."""
+
+    tools: list[BaseTool]
+    """Additional tools registered by the middleware."""
+
+    @property
+    def name(self) -> str:
+        """The name of the middleware instance.
+
+        Defaults to the class name, but can be overridden for custom naming.
+        """
+        return self.__class__.__name__
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/summarization.py (L102-130)
+
+```python
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:  # noqa: ARG002
+        """Process messages before model invocation, potentially triggering summarization."""
+        messages = state["messages"]
+        self._ensure_message_ids(messages)
+
+        total_tokens = self.token_counter(messages)
+        if (
+            self.max_tokens_before_summary is not None
+            and total_tokens < self.max_tokens_before_summary
+        ):
+            return None
+
+        cutoff_index = self._find_safe_cutoff(messages)
+
+        if cutoff_index <= 0:
+            return None
+
+        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
+
+        summary = self._create_summary(messages_to_summarize)
+        new_messages = self._build_new_messages(summary)
+
+        return {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *new_messages,
+                *preserved_messages,
+            ]
+        }
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py (L52-100)
+
+```python
+class HITLRequest(TypedDict):
+    """Request for human feedback on a sequence of actions requested by a model."""
+
+    action_requests: list[ActionRequest]
+    """A list of agent actions for human review."""
+
+    review_configs: list[ReviewConfig]
+    """Review configuration for all possible actions."""
+
+
+class ApproveDecision(TypedDict):
+    """Response when a human approves the action."""
+
+    type: Literal["approve"]
+    """The type of response when a human approves the action."""
+
+
+class EditDecision(TypedDict):
+    """Response when a human edits the action."""
+
+    type: Literal["edit"]
+    """The type of response when a human edits the action."""
+
+    edited_action: Action
+    """Edited action for the agent to perform.
+
+    Ex: for a tool call, a human reviewer can edit the tool name and args.
+    """
+
+
+class RejectDecision(TypedDict):
+    """Response when a human rejects the action."""
+
+    type: Literal["reject"]
+    """The type of response when a human rejects the action."""
+
+    message: NotRequired[str]
+    """The message sent to the model explaining why the action was rejected."""
+
+
+Decision = ApproveDecision | EditDecision | RejectDecision
+
+
+class HITLResponse(TypedDict):
+    """Response payload for a HITLRequest."""
+
+    decisions: list[Decision]
+    """The decisions made by the human."""
+
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py (L238-278)
+
+```python
+    def _process_decision(
+        self,
+        decision: Decision,
+        tool_call: ToolCall,
+        config: InterruptOnConfig,
+    ) -> tuple[ToolCall | None, ToolMessage | None]:
+        """Process a single decision and return the revised tool call and optional tool message."""
+        allowed_decisions = config["allowed_decisions"]
+
+        if decision["type"] == "approve" and "approve" in allowed_decisions:
+            return tool_call, None
+        if decision["type"] == "edit" and "edit" in allowed_decisions:
+            edited_action = decision["edited_action"]
+            return (
+                ToolCall(
+                    type="tool_call",
+                    name=edited_action["name"],
+                    args=edited_action["args"],
+                    id=tool_call["id"],
+                ),
+                None,
+            )
+        if decision["type"] == "reject" and "reject" in allowed_decisions:
+            # Create a tool message with the human's text response
+            content = decision.get("message") or (
+                f"User rejected the tool call for `{tool_call['name']}` with id {tool_call['id']}"
+            )
+            tool_message = ToolMessage(
+                content=content,
+                name=tool_call["name"],
+                tool_call_id=tool_call["id"],
+                status="error",
+            )
+            return tool_call, tool_message
+        msg = (
+            f"Unexpected human decision: {decision}. "
+            f"Decision type '{decision.get('type')}' "
+            f"is not allowed for tool '{tool_call['name']}'. "
+            f"Expected one of {allowed_decisions} based on the tool's configuration."
+        )
+        raise ValueError(msg)
+```
+
+**File:** langchain-master/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py (L327-329)
+
+```python
+        # Send interrupt and get response
+        hitl_response: HITLResponse = interrupt(hitl_request)
+        decisions = hitl_response["decisions"]
+```
+
+**File:** deepagents-master/libs/deepagents-cli/deepagents_cli/agent.py (L165-168)
+
+```python
+    agent_middleware = [
+        AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
+        shell_middleware,
+    ]
+```
+
+**File:** deepagents-master/libs/deepagents/tests/integration_tests/test_hitl.py (L18-22)
+
+```python
+    def test_hitl_agent(self):
+        checkpointer = MemorySaver()
+        agent = create_deep_agent(tools=[sample_tool, get_weather, get_soccer_scores], interrupt_on=SAMPLE_TOOL_CONFIG, checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": uuid.uuid4()}}
+        assert_all_deepagent_qualities(agent)
+```
+
+**File:** deepagents-master/libs/deepagents/tests/integration_tests/test_hitl.py (L60-65)
+
+```python
+        result2 = agent.invoke(Command(resume={"decisions": [{"type": "approve"}, {"type": "approve"}]}), config=config)
+        tool_results = [msg for msg in result2.get("messages", []) if msg.type == "tool"]
+        assert any([tool_result.name == "sample_tool" for tool_result in tool_results])
+        assert any([tool_result.name == "get_weather" for tool_result in tool_results])
+        assert any([tool_result.name == "get_soccer_scores" for tool_result in tool_results])
+        assert "__interrupt__" not in result2
+```
+

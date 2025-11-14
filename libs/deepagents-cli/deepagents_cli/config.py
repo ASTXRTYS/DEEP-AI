@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import dotenv
 from rich.console import Console
@@ -36,12 +37,16 @@ DEEP_AGENTS_ASCII = """
  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
 """
 
-# Interactive commands
+# Interactive commands (shown in autocomplete)
+# Only essential, high-signal commands are listed here for clean UX.
 COMMANDS = {
-    "clear": "Clear screen and reset conversation",
-    "help": "Show help information",
-    "tokens": "Show token usage for current session",
-    "quit": "Exit the CLI",
+    "help": "Show help and available commands",
+    "new": "Create a new thread (/new [name])",
+    "threads": "Switch threads (interactive)",
+    "handoff": "Summarize current thread and start a child",
+    "tokens": "Show token usage statistics",
+    "clear": "Clear screen",
+    "quit": "Exit (also: /exit)",
     "exit": "Exit the CLI",
 }
 
@@ -55,12 +60,29 @@ config = {"recursion_limit": 1000}
 # Rich console instance
 console = Console(highlight=False)
 
+# Server request timeout (seconds)
+try:
+    SERVER_REQUEST_TIMEOUT: float = float(os.getenv("LANGGRAPH_SERVER_TIMEOUT", "5"))
+except ValueError:
+    SERVER_REQUEST_TIMEOUT = 5.0
+
+# Async checkpointer (required since execute_task is async)
+# Set to "0" only for debugging/compatibility testing
+USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in {
+    "1",
+    "true",
+    "True",
+}
+
 
 class SessionState:
-    """Holds mutable session state (auto-approve mode, etc)."""
+    """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False) -> None:
+    def __init__(self, auto_approve: bool = False, thread_manager: Any | None = None) -> None:
         self.auto_approve = auto_approve
+        self.thread_manager = thread_manager
+        self.model = None
+        self.pending_handoff_child_id: str | None = None  # Deferred handoff target
         self.exit_hint_until: float | None = None
         self.exit_hint_handle = None
 

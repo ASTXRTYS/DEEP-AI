@@ -8,8 +8,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-from deepagents.backends.protocol import SandboxBackendProtocol
-
+from deepagents_cli.backends_compat import SandboxBackendProtocol
 from deepagents_cli.config import console
 
 

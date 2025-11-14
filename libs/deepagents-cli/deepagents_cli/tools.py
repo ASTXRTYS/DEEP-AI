@@ -1,11 +1,40 @@
 """Custom tools for the CLI agent."""
 
+from html.parser import HTMLParser
 import os
 from typing import Any, Literal
 
 import requests
-from markdownify import markdownify
 from tavily import TavilyClient
+
+try:  # Optional dependency – fall back to a lightweight HTML stripper if absent
+    from markdownify import markdownify as _markdownify  # type: ignore
+except ImportError:  # pragma: no cover - relies on external optional package
+    _markdownify = None
+
+
+class _PlainTextHTMLStripper(HTMLParser):
+    """Very small HTML→text converter used when markdownify is unavailable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[str] = []
+
+    def handle_data(self, data: str) -> None:  # noqa: D401 - HTMLParser interface
+        self._chunks.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _to_markdown(html: str) -> tuple[str, bool]:
+    if _markdownify is not None:
+        return _markdownify(html), True
+
+    parser = _PlainTextHTMLStripper()
+    parser.feed(html)
+    parser.close()
+    return parser.get_text(), False
 
 # Initialize Tavily client if API key is available
 tavily_client = (
@@ -173,14 +202,21 @@ def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
         )
         response.raise_for_status()
 
-        # Convert HTML content to markdown
-        markdown_content = markdownify(response.text)
+        # Convert HTML content to markdown (or plaintext fallback)
+        markdown_content, used_markdownify = _to_markdown(response.text)
 
-        return {
+        result = {
             "url": str(response.url),
             "markdown_content": markdown_content,
             "status_code": response.status_code,
             "content_length": len(markdown_content),
         }
+
+        if not used_markdownify:
+            result[
+                "warning"
+            ] = "markdownify not installed - returned plain text; install optional dependency for richer formatting"
+
+        return result
     except Exception as e:
         return {"error": f"Fetch URL error: {e!s}", "url": url}

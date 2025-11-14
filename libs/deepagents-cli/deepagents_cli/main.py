@@ -5,17 +5,24 @@ import asyncio
 import sys
 from pathlib import Path
 
-from deepagents.backends.protocol import SandboxBackendProtocol
-
 from deepagents_cli.agent import create_agent_with_config, list_agents, reset_agent
 from deepagents_cli.commands import execute_bash_command, handle_command
-from deepagents_cli.config import COLORS, DEEP_AGENTS_ASCII, SessionState, console, create_model
+from deepagents_cli.config import (
+    COLORS,
+    DEEP_AGENTS_ASCII,
+    SessionState,
+    console,
+    create_model,
+    USE_ASYNC_CHECKPOINTER,
+)
 from deepagents_cli.execution import execute_task
 from deepagents_cli.input import create_prompt_session
 from deepagents_cli.integrations.sandbox_factory import (
     create_sandbox,
     get_default_working_dir,
 )
+from deepagents_cli.backends_compat import SandboxBackendProtocol
+from deepagents_cli.thread_manager import ThreadManager
 from deepagents_cli.tools import fetch_url, http_request, tavily_client, web_search
 from deepagents_cli.ui import TokenTracker, show_help
 
@@ -140,6 +147,16 @@ async def simple_cli(
     else:
         sandbox_id = None
 
+    try:
+        from deepagents_cli.server_client import is_server_available
+
+        if is_server_available():
+            console.print("[green]● Connected to LangGraph server[/green]")
+            console.print()
+    except Exception:
+        console.print("[yellow]⚠ Unable to reach LangGraph server[/yellow]")
+        console.print()
+
     # Display sandbox info persistently (survives console.clear())
     if sandbox_type and sandbox_id:
         console.print(f"[yellow]⚡ {sandbox_type.capitalize()} sandbox: {sandbox_id}[/yellow]")
@@ -209,7 +226,7 @@ async def simple_cli(
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker)
+            result = await handle_command(user_input, agent, token_tracker, session_state)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -230,6 +247,24 @@ async def simple_cli(
         await execute_task(
             user_input, agent, assistant_id, session_state, token_tracker, backend=backend
         )
+
+        if session_state.pending_handoff_child_id:
+            child_id = session_state.pending_handoff_child_id
+            if session_state.thread_manager:
+                session_state.thread_manager.switch_thread(child_id)
+            session_state.pending_handoff_child_id = None
+            console.print()
+            console.print(f"[green]✓ Switched to new thread: {child_id}[/green]")
+            console.print()
+
+
+def _warn_if_async_checkpointer_disabled() -> None:
+    if not USE_ASYNC_CHECKPOINTER:
+        console.print("[yellow]⚠ Warning: Async checkpointer disabled (not recommended)[/yellow]")
+        console.print(
+            "[dim]Set DEEPAGENTS_USE_ASYNC_CHECKPOINTER=1 to enable (required for proper operation)[/dim]"
+        )
+        console.print()
 
 
 async def _run_agent_session(
@@ -257,27 +292,69 @@ async def _run_agent_session(
     if tavily_client is not None:
         tools.append(web_search)
 
-    agent, composite_backend = create_agent_with_config(
-        model, assistant_id, tools, sandbox=sandbox_backend, sandbox_type=sandbox_type
-    )
-
-    # Calculate baseline token count for accurate token tracking
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from .agent import get_system_prompt
     from .token_utils import calculate_baseline_tokens
 
     agent_dir = Path.home() / ".deepagents" / assistant_id
-    system_prompt = get_system_prompt(sandbox_type=sandbox_type)
-    baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_db = agent_dir / "checkpoints.db"
 
-    await simple_cli(
-        agent,
-        assistant_id,
-        session_state,
-        baseline_tokens,
-        backend=composite_backend,
-        sandbox_type=sandbox_type,
-        setup_script_path=setup_script_path,
+    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db.resolve())) as checkpointer:
+        agent, composite_backend = create_agent_with_config(
+            model,
+            assistant_id,
+            tools,
+            checkpointer=checkpointer,
+            sandbox=sandbox_backend,
+            sandbox_type=sandbox_type,
+        )
+
+        system_prompt = get_system_prompt(sandbox_type=sandbox_type)
+        baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
+
+        await simple_cli(
+            agent,
+            assistant_id,
+            session_state,
+            baseline_tokens,
+            backend=composite_backend,
+            sandbox_type=sandbox_type,
+            setup_script_path=setup_script_path,
+        )
+
+
+def _ensure_server_running() -> None:
+    from deepagents_cli.server_client import is_server_available, start_server_if_needed
+
+    if is_server_available():
+        return
+
+    console.print("[yellow]⚠ LangGraph server is not running[/yellow]")
+    console.print()
+    console.print("The DeepAgents CLI requires the LangGraph server for thread management.")
+    console.print(
+        "This enables features like message history, thread naming, and Studio integration."
     )
+    console.print()
+
+    console.print("[dim]Starting LangGraph dev server...[/dim]")
+    started, error_message = start_server_if_needed()
+    if started:
+        console.print("[green]✓ Server started successfully![/green]")
+        console.print()
+        return
+
+    console.print("[red]✗ Failed to start server automatically[/red]")
+    console.print()
+    if error_message:
+        console.print(f"[red]{error_message}[/red]")
+        console.print()
+    console.print("Please start the server manually in another terminal:")
+    console.print("  [cyan]langgraph dev[/cyan]")
+    console.print()
+    console.print("Then restart the CLI.")
+    sys.exit(1)
 
 
 async def main(
@@ -296,7 +373,15 @@ async def main(
         sandbox_id: Optional existing sandbox ID to reuse
         setup_script_path: Optional path to setup script to run in sandbox
     """
+    _ensure_server_running()
+    _warn_if_async_checkpointer_disabled()
+
     model = create_model()
+    session_state.model = model
+
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    thread_manager = ThreadManager(agent_dir, assistant_id)
+    session_state.thread_manager = thread_manager
 
     # Branch 1: User wants a sandbox
     if sandbox_type != "none":

@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from deepagents.backends.protocol import BACKEND_TYPES
 from deepagents.backends.utils import perform_string_replacement
+from deepagents_cli.backends_compat import BACKEND_TYPES
 
 FileOpStatus = Literal["pending", "success", "error"]
 

@@ -22,12 +22,6 @@ def test_cleanup_middleware_sets_flag_once():
 def test_cleanup_middleware_ignores_non_pending_threads():
     middleware = HandoffCleanupMiddleware()
 
-    assert (
-        middleware.after_agent({}, _runtime_for({"pending": False, "cleanup_required": True}))
-        is None
-    )
-    assert (
-        middleware.after_agent({}, _runtime_for({"pending": True, "cleanup_required": False}))
-        is None
-    )
+    assert middleware.after_agent({}, _runtime_for({"pending": False, "cleanup_required": True})) is None
+    assert middleware.after_agent({}, _runtime_for({"pending": True, "cleanup_required": False})) is None
     assert middleware.after_agent({}, SimpleNamespace(config={"metadata": {}})) is None

@@ -43,10 +43,13 @@ def stub_summary() -> HandoffSummary:
     )
 
 
-@pytest.mark.parametrize("decision_payload", [
-    {"decisions": [{"type": "approve"}]},
-    {"decisions": [{"type": "approve", "message": "looks good"}]},
-])
+@pytest.mark.parametrize(
+    "decision_payload",
+    [
+        {"decisions": [{"type": "approve"}]},
+        {"decisions": [{"type": "approve", "message": "looks good"}]},
+    ],
+)
 def test_handoff_middleware_emits_canonical_payload(monkeypatch, stub_summary, decision_payload):
     middleware = HandoffSummarizationMiddleware(model=SimpleNamespace())
 

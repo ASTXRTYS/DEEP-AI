@@ -96,11 +96,9 @@ def get_system_prompt(sandbox_type: str | None = None) -> str:
         The system prompt string (without agent.md content)
     """
     if sandbox_type:
-        # Get provider-specific working directory
         from deepagents_cli.integrations.sandbox_factory import get_default_working_dir
 
         working_dir = get_default_working_dir(sandbox_type)
-
         working_dir_section = f"""### Current Working Directory
 
 You are operating in a **remote Linux sandbox** at `{working_dir}`.
@@ -143,17 +141,13 @@ Some tool calls require user approval before execution. When a tool call is reje
 
 Respect the user's decisions and work with them collaboratively.
 
-### Web Search Tool Usage
+### Research & API Tools
 
-When you use the web_search tool:
-1. The tool will return search results with titles, URLs, and content excerpts
-2. You MUST read and process these results, then respond naturally to the user
-3. NEVER show raw JSON or tool results directly to the user
-4. Synthesize the information from multiple sources into a coherent answer
-5. Cite your sources by mentioning page titles or URLs when relevant
-6. If the search doesn't find what you need, explain what you found and ask clarifying questions
+- **web_search**: Use for research, documentation, or discovering new information. Read the returned excerpts, synthesize the findings, and cite sources. Never show raw JSON.
+- **fetch_url**: Use when you need to read a specific web page end-to-end. It converts HTML to markdown—summarize the important information rather than dumping the raw output.
+- **http_request**: Use ONLY for JSON/REST APIs and programmatic endpoints. Do **not** call it for HTML pages or documentation. If you need human-readable content, prefer `web_search` or `fetch_url`.
 
-The user only sees your text responses - not tool results. Always provide a complete, natural language answer after using web_search.
+Always respond in natural language after using these tools.
 
 ### Todo List Management
 
@@ -169,7 +163,6 @@ When using the write_todos tool:
 6. Update todo status promptly as you complete each item
 
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
-    )
 
 
 def create_agent_with_config(

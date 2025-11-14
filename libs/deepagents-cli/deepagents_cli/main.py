@@ -57,19 +57,38 @@ def check_cli_dependencies() -> None:
         missing.append("prompt-toolkit")
 
     if missing:
-        print("\n❌ Missing required CLI dependencies!")
-        print("\nThe following packages are required to use the deepagents CLI:")
+        console.print("[bold red]Missing required CLI dependencies![/bold red]")
+        console.print()
+        console.print("The following packages are required to use the deepagents CLI:")
         for pkg in missing:
-            print(f"  - {pkg}")
-        print("\nPlease install them with:")
-        print("  pip install deepagents[cli]")
-        print("\nOr install all dependencies:")
-        print("  pip install 'deepagents[cli]'")
+            console.print(f"  • {pkg}")
+        console.print()
+        console.print(
+            "Install them with: [cyan]pip install 'deepagents[cli]'[/cyan] "
+            "or add them to your environment."
+        )
+        console.print("Full dependency set:")
+        console.print("  [cyan]pip install 'deepagents[cli]'[/cyan]")
         sys.exit(1)
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     """Parse command line arguments."""
+    commands = {"list", "help", "reset"}
+
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    if argv:
+        first = argv[0]
+        if not first.startswith("-") and first not in commands:
+            console.print(
+                f"[dim]Interpreting '{first}' as --agent {first} (legacy positional syntax)[/dim]"
+            )
+            argv = ["--agent", first, *argv[1:]]
+
     parser = argparse.ArgumentParser(
         description="DeepAgents - AI Coding Assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -116,8 +135,14 @@ def parse_args():
         "--sandbox-setup",
         help="Path to setup script to run in sandbox after creation",
     )
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help="Show this help message and exit (same as 'deepagents help').",
+    )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 async def simple_cli(
@@ -197,7 +222,8 @@ async def simple_cli(
         console.print()
 
     console.print(
-        "  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
+        "  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, "
+        "Ctrl+M for menu, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
         style=f"dim {COLORS['dim']}",
     )
     console.print()
@@ -220,6 +246,18 @@ async def simple_cli(
         except KeyboardInterrupt:
             console.print("\nGoodbye!", style=COLORS["primary"])
             break
+
+        if session_state.menu_requested:
+            session_state.menu_requested = False
+            from deepagents_cli.menu_system import MenuSystem
+
+            menu_system = MenuSystem(session_state, agent, token_tracker)
+            result = await menu_system.show_main_menu()
+            if result == "exit":
+                console.print("\nGoodbye!", style=COLORS["primary"])
+                break
+            # Regardless of selection (handled or cancelled), return to prompt
+            continue
 
         if not user_input:
             continue
@@ -310,7 +348,7 @@ async def _run_agent_session(
             sandbox_type=sandbox_type,
         )
 
-        system_prompt = get_system_prompt(sandbox_type=sandbox_type)
+        system_prompt = get_system_prompt()
         baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 
         await simple_cli(

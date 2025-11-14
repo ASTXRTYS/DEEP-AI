@@ -49,10 +49,10 @@ class HandoffToolMiddleware(AgentMiddleware):
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """No pre-processing needed - tool registration is automatic."""
         return None
-    
+
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """No state updates needed - tool registration is sufficient.
-        
+
         Detection of request_handoff calls happens independently in
         HandoffSummarizationMiddleware by inspecting messages.
         """

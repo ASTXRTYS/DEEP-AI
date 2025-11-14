@@ -7,6 +7,7 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
 
+
 class HandoffApprovalMiddleware(AgentMiddleware):
     """Compatibility shim retained for backwards compatibility.
 
@@ -23,5 +24,6 @@ class HandoffApprovalMiddleware(AgentMiddleware):
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """No-op hook retained for compatibility."""
         return None
+
 
 __all__ = ["HandoffApprovalMiddleware"]

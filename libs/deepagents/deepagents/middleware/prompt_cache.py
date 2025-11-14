@@ -6,7 +6,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.messages import BaseMessage
-from langchain_core.callbacks.manager import get_callback_manager_for_config
+from langchain_core.runnables.config import get_callback_manager_for_config
 
 
 def _message_has_content(message: BaseMessage) -> bool:

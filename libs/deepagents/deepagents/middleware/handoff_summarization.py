@@ -266,10 +266,7 @@ def select_messages_for_summary(messages: Sequence[BaseMessage]) -> list[BaseMes
         tool_call_id = getattr(msg, "tool_call_id", None)
         if tool_call_id is None:
             continue
-        has_pair = any(
-            isinstance(candidate, AIMessage) and _ai_has_tool_call(candidate, tool_call_id)
-            for candidate in window[:idx]
-        )
+        has_pair = any(isinstance(candidate, AIMessage) and _ai_has_tool_call(candidate, tool_call_id) for candidate in window[:idx])
         if has_pair:
             continue
         search_upper = max(0, start_index - MAX_TOOL_PAIR_LOOKBACK)
@@ -312,14 +309,7 @@ def render_summary_markdown(title: str, tldr: str, body: Iterable[str]) -> str:
     bullet_lines = [f"- {line.strip()}" for line in body if line.strip()]
     if not bullet_lines:
         bullet_lines = ["- Additional details pending."]
-    return (
-        "### Recent Thread Snapshot\n"
-        f"**Title:** {title.strip()}\n"
-        f"**TL;DR:** {tldr.strip()}\n\n"
-        "#### Key Points\n"
-        + "\n".join(bullet_lines)
-        + "\n"
-    )
+    return f"### Recent Thread Snapshot\n**Title:** {title.strip()}\n**TL;DR:** {tldr.strip()}\n\n#### Key Points\n" + "\n".join(bullet_lines) + "\n"
 
 
 def _build_refinement_prompt(
@@ -531,11 +521,7 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
 
         assistant_id = metadata.get("assistant_id") or metadata.get("assistant") or "agent"
         parent_thread_id = configurable.get("thread_id") or metadata.get("thread_id") or "unknown"
-        preview_only = bool(
-            metadata.get("handoff_preview_only")
-            or metadata.get("handoff", {}).get("preview_only")
-            or state.get("preview_only")
-        )
+        preview_only = bool(metadata.get("handoff_preview_only") or metadata.get("handoff", {}).get("preview_only") or state.get("preview_only"))
 
         # Pull refinement state
         raw_iteration = state.get("_handoff_iteration") or 0

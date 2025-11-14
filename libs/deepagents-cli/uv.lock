@@ -696,7 +696,7 @@ test = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
-    { name = "ruff", specifier = ">=0.12.2,<0.13.0" },
+    { name = "ruff", specifier = ">=0.12.2,<0.15.0" },
 ]
 
 [[package]]

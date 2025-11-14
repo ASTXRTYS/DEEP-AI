@@ -34,7 +34,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
     allowing HITL pauses to succeed.
     """
 
-    @traceable(name="shell.command.execute", tags=["middleware", "shell"]) 
+    @traceable(name="shell.command.execute", tags=["middleware", "shell"])
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -49,7 +49,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
             )
         return super().wrap_tool_call(request, handler)
 
-    @traceable(name="shell.command.execute", tags=["middleware", "shell"]) 
+    @traceable(name="shell.command.execute", tags=["middleware", "shell"])
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -77,7 +77,7 @@ class ResumableShellToolMiddleware(ShellToolMiddleware):
         resources = state.get("shell_session_resources")
         return isinstance(resources, _SessionResources)
 
-    @traceable(name="shell.session.restore", tags=["middleware", "shell"]) 
+    @traceable(name="shell.session.restore", tags=["middleware", "shell"])
     def _get_or_create_resources(self, state: AgentState) -> _SessionResources:
         resources = state.get("shell_session_resources")
         if isinstance(resources, _SessionResources):

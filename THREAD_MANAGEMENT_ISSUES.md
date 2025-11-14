@@ -173,23 +173,26 @@ if subcommand == "delete":
 
 ---
 
-### 4. Menu-Within-Menu Redundancy
+### 4. Remove Unwanted `/menu` Command
 
-**Status:** 🟡 UX ISSUE
-**Severity:** LOW
+**Status:** 🔴 REMOVE THIS
+**Severity:** MEDIUM
 **Location:** `libs/deepagents-cli/deepagents_cli/config.py:44`
 
 #### Problem
-When users type `/` to see command autocomplete, the list includes a "menu" command, which is confusing:
-1. The autocomplete list IS already a menu of commands
-2. Users can press `Ctrl+M` to open the main menu
-3. Having "menu" in the command list is circular and redundant
+The `/menu` command is **not wanted** and should be completely removed. It creates confusion:
+1. When users type `/` to see commands, "menu" appears - which is circular (menu within menu)
+2. Users already have `Ctrl+M` for the main menu
+3. The `/` autocomplete IS the command menu - having `/menu` in that list is redundant
+4. This command serves no purpose and clutters the interface
+
+**User preference: We do not care for the `/menu` command at all.**
 
 #### Current State
 ```python
 # config.py:43-53
 COMMANDS = {
-    "menu": "Open main menu (also: Ctrl+M)",  # ← Redundant!
+    "menu": "Open main menu (also: Ctrl+M)",  # ← NOT WANTED - REMOVE!
     "help": "Show help and available commands",
     "new": "Create a new thread (/new [name])",
     "threads": "Switch threads (interactive)",
@@ -202,18 +205,23 @@ COMMANDS = {
 ```
 
 #### Fix Required
-**Remove** the `/menu` command from COMMANDS dict:
+**DELETE** the `/menu` command entirely from COMMANDS dict:
 
 ```python
 COMMANDS = {
-    # "menu": "Open main menu (also: Ctrl+M)",  # REMOVE THIS
+    # "menu": "Open main menu (also: Ctrl+M)",  # DELETED - not wanted
     "help": "Show help and available commands",
     "new": "Create a new thread (/new [name])",
-    # ... rest stays the same
+    "threads": "Switch threads (interactive)",
+    "handoff": "Summarize current thread and start a child",
+    "tokens": "Show token usage statistics",
+    "clear": "Clear screen",
+    "quit": "Exit (also: /exit)",
+    "exit": "Exit the CLI",
 }
 ```
 
-Users still have `Ctrl+M` to open the menu - no functionality lost.
+**Note:** If `/menu` command handling exists elsewhere in the code (e.g., in `commands.py`), remove that too. Users have `Ctrl+M` - `/menu` is completely unnecessary.
 
 ---
 
@@ -295,10 +303,11 @@ These files are ready to use and compatible with our `rich`-based approach.
    - Example: Use `radiolist_dialog()`, `button_dialog()`, etc.
    - Reference: `input.py` for prompt-toolkit patterns already in use
 
-2. **Remove redundant `/menu` command from autocomplete**
+2. **DELETE unwanted `/menu` command**
    - File: `libs/deepagents-cli/deepagents_cli/config.py`
-   - Action: Delete `"menu": "Open main menu (also: Ctrl+M)",` from COMMANDS dict
-   - Impact: Cleaner UX, `Ctrl+M` still works
+   - Action: Remove `"menu": "Open main menu (also: Ctrl+M)",` from COMMANDS dict entirely
+   - Note: We do not want this command - it's confusing and serves no purpose
+   - Impact: Cleaner UX, less confusion, `Ctrl+M` still available
 
 3. **Check and fix handoff_ui.py**
    - File: `libs/deepagents-cli/deepagents_cli/handoff_ui.py`
@@ -471,11 +480,11 @@ Users currently experience:
 - ❌ Broken `Ctrl+M` menu (import error)
 - ❌ No interactive thread switching (manual typing required)
 - ❌ Potentially broken `/handoff` prompts
-- ❌ Confusing `/menu` in command list
+- ❌ Unwanted `/menu` command cluttering the interface
 
 ### Priority Assessment
 - **P0 (Blocking):** Rewrite menu_system to remove questionary - currently crashes
-- **P1 (High):** Remove redundant `/menu` from autocomplete - confusing UX
+- **P1 (High):** DELETE unwanted `/menu` command - not wanted at all, confusing UX
 - **P1 (High):** Fix handoff_ui if it uses questionary - broken workflow
 - **P2 (Medium):** Implement interactive thread picker - significant UX regression
 - **P3 (Low):** Consider restoring advanced thread commands - uncertain value

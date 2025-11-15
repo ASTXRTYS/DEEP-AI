@@ -1,5 +1,16 @@
 # WARP.md
 
+I want to focus on the aestetics of the deepagents-cli app and to do so i have provided you with .png files of the
+cli and what it looks like currently so that you may know exactley what i mean. 
+
+
+ 
+  i should note that we need to follow the same pattern and convention for prompt toolkit being applied currently in the repo.
+ 
+  to help you with that mandate i have provided you with the indexed open source lib of the prompt toolkit repo that you can query
+  a chat bot that can answer any and all questions you may need to ask to achieve your task. when using the deepwiki for this
+  task the relevant deepwiki to query is: https://deepwiki.com/prompt-toolkit/python-prompt-toolkit
+
 This file provides guidance to WARP (warp.dev) when working with code in this repository.
 
 > **Mandatory Protocol:** Warp agents must read and comply with [`AGENT.md`](AGENT.md) before running commands or editing files. Treat that document as the non-negotiable operating agreement for this repo.

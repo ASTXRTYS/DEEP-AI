@@ -41,7 +41,6 @@ DEEP_AGENTS_ASCII = """
 # Only essential, high-signal commands are listed here for clean UX.
 # Advanced commands still work but are hidden from autocomplete.
 COMMANDS = {
-    "menu": "Open main menu (also: Ctrl+M)",
     "help": "Show help and available commands",
     "new": "Create a new thread (/new [name])",
     "threads": "Switch threads (interactive)",
@@ -85,7 +84,7 @@ class SessionState:
         self.thread_manager = thread_manager
         self.model = None
         self.pending_handoff_child_id: str | None = None  # Deferred handoff target
-        self.menu_requested: bool = False  # Flag for Ctrl+M menu trigger
+        self.menu_requested: bool = False  # Reserved for manual menu triggers
         self.exit_hint_until: float | None = None
         self.exit_hint_handle = None
 

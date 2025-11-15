@@ -6,7 +6,8 @@ all canonical commands work correctly without requiring a LangGraph server.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -53,6 +54,12 @@ def token_tracker(monkeypatch):
     return tracker
 
 
+def run_command(command: str, session_state, token_tracker, agent=None):
+    """Helper to run the async handle_command coroutine."""
+
+    return asyncio.run(handle_command(command, agent, token_tracker, session_state))
+
+
 # ============================================================================
 # Core Command Routing Tests
 # ============================================================================
@@ -61,14 +68,14 @@ def token_tracker(monkeypatch):
 @pytest.mark.parametrize("command", ["/quit", "/exit", "/q"])
 def test_quit_commands_return_exit_sentinel(command, session_state, token_tracker):
     """Test all quit variants return 'exit' string."""
-    result = handle_command(command, None, token_tracker, session_state)
+    result = run_command(command, session_state, token_tracker)
     assert result == "exit"
 
 
 @patch("deepagents_cli.commands.console.print")
 def test_help_command_displays_and_returns_true(mock_print, session_state, token_tracker):
     """Test /help displays help and returns True."""
-    result = handle_command("/help", None, token_tracker, session_state)
+    result = run_command("/help", session_state, token_tracker)
 
     assert result is True
     mock_print.assert_called()  # Verify help was displayed
@@ -76,7 +83,7 @@ def test_help_command_displays_and_returns_true(mock_print, session_state, token
 
 def test_tokens_command_calls_display_session(session_state, token_tracker):
     """Test /tokens invokes TokenTracker.display_session()."""
-    result = handle_command("/tokens", None, token_tracker, session_state)
+    result = run_command("/tokens", session_state, token_tracker)
 
     assert result is True
     # Spy pattern allows direct assertion
@@ -86,7 +93,7 @@ def test_tokens_command_calls_display_session(session_state, token_tracker):
 @patch("deepagents_cli.commands.console.print")
 def test_unknown_command_shows_warning(mock_print, session_state, token_tracker):
     """Test unknown command shows warning and returns True."""
-    result = handle_command("/foobar", None, token_tracker, session_state)
+    result = run_command("/foobar", session_state, token_tracker)
 
     assert result is True
 
@@ -105,7 +112,7 @@ def test_unknown_command_shows_warning(mock_print, session_state, token_tracker)
 @patch("deepagents_cli.commands.console.print")
 def test_new_command_with_name(mock_print, session_state, token_tracker):
     """Test /new with name creates thread with that name."""
-    result = handle_command("/new My Project", None, token_tracker, session_state)
+    result = run_command("/new My Project", session_state, token_tracker)
 
     assert result is True
     session_state.thread_manager.create_thread.assert_called_once_with(name="My Project")
@@ -114,63 +121,65 @@ def test_new_command_with_name(mock_print, session_state, token_tracker):
 @patch("deepagents_cli.commands.console.print")
 def test_new_command_without_name(mock_print, session_state, token_tracker):
     """Test /new without name creates thread with name=None."""
-    result = handle_command("/new", None, token_tracker, session_state)
+    result = run_command("/new", session_state, token_tracker)
 
     assert result is True
     session_state.thread_manager.create_thread.assert_called_once_with(name=None)
 
 
 @patch("deepagents_cli.commands.console.print")
-def test_threads_with_args_shows_deprecation_warning(mock_print, session_state, token_tracker):
-    """Test /threads with arguments shows friendly error (deprecated subcommands)."""
-    result = handle_command("/threads continue abc123", None, token_tracker, session_state)
+def test_threads_with_args_shows_unknown_message(mock_print, session_state, token_tracker):
+    """Test /threads with unsupported subcommand shows helpful warning."""
+    result = run_command("/threads continue abc123", session_state, token_tracker)
 
     assert result is True
-
-    # Robust Rich output checking
     assert any(
-        "doesn't take arguments" in (args[0].lower() if args else "")
+        "unknown /threads" in (args[0].lower() if args else "")
         for args, _ in mock_print.call_args_list
     )
 
 
-@patch("builtins.input", return_value="1")
-@patch("deepagents_cli.commands._enrich_thread_with_server_data", side_effect=lambda t: t)
-@patch("deepagents_cli.commands.console.print")
-def test_threads_picker_interactive_flow(
-    mock_print, mock_enrich, mock_input, session_state, token_tracker
-):
-    """Test /threads interactive picker switches thread successfully."""
-    # Mock thread list with proper structure
-    sample_threads = [
-        {
-            "id": "thread-111",
-            "name": "First Thread",
-            "created": "2025-01-11T10:00:00Z",
-            "last_used": "2025-01-11T10:30:00Z",
-            "token_count": 1500,
-        },
-        {
-            "id": "thread-222",
-            "name": "Second Thread",
-            "created": "2025-01-11T11:00:00Z",
-            "last_used": "2025-01-11T11:30:00Z",
-            "token_count": 2500,
-        },
+@patch("deepagents_cli.commands.sys.stdin.isatty", return_value=True)
+@patch("deepagents_cli.commands._run_threads_dashboard", new_callable=AsyncMock)
+def test_threads_uses_dashboard_when_tty(mock_dashboard, mock_isatty, session_state, token_tracker, monkeypatch):
+    """Test /threads invokes the Rich dashboard when running in a TTY."""
+    mock_console = MagicMock()
+    mock_console.is_terminal = True
+    mock_console.print = MagicMock()
+    mock_console.clear = MagicMock()
+    mock_console.input = MagicMock(return_value="")
+    monkeypatch.setattr("deepagents_cli.commands.console", mock_console, raising=False)
+    mock_dashboard.return_value = True
+
+    session_state.thread_manager.list_threads.return_value = [
+        {"id": "thread-111", "name": "First", "last_used": "2025-01-11T10:00:00Z"}
     ]
-    session_state.thread_manager.list_threads.return_value = sample_threads
-    session_state.thread_manager.get_current_thread_id.return_value = "thread-111"
 
-    # Mock get_thread_metadata for success message
-    session_state.thread_manager.get_thread_metadata.return_value = {
-        "id": "thread-111",
-        "name": "First Thread",
-    }
-
-    result = handle_command("/threads", None, token_tracker, session_state)
+    result = run_command("/threads", session_state, token_tracker)
 
     assert result is True
-    session_state.thread_manager.switch_thread.assert_called_once_with("thread-111")
+    mock_dashboard.assert_awaited_once()
+
+
+@patch("deepagents_cli.commands._print_thread_list")
+@patch("deepagents_cli.commands._run_threads_dashboard", new_callable=AsyncMock)
+def test_threads_falls_back_without_tty(mock_dashboard, mock_print_list, session_state, token_tracker, monkeypatch):
+    """Test /threads prints a static list when no interactive terminal is available."""
+    mock_console = MagicMock()
+    mock_console.is_terminal = False
+    mock_console.print = MagicMock()
+    monkeypatch.setattr("deepagents_cli.commands.console", mock_console, raising=False)
+    monkeypatch.setattr("deepagents_cli.commands.sys.stdin.isatty", lambda: False, raising=False)
+
+    session_state.thread_manager.list_threads.return_value = [
+        {"id": "thread-111", "name": "First", "last_used": "2025-01-11T10:00:00Z"}
+    ]
+
+    result = run_command("/threads", session_state, token_tracker)
+
+    assert result is True
+    mock_dashboard.assert_not_called()
+    mock_print_list.assert_called_once()
 
 
 # ============================================================================
@@ -184,7 +193,7 @@ def test_clear_without_thread_manager_shows_warning(mock_print, mock_clear, toke
     """Test /clear without thread manager shows warning but still resets tracker."""
     session_state_no_manager = SessionState(auto_approve=False, thread_manager=None)
 
-    result = handle_command("/clear", None, token_tracker, session_state_no_manager)
+    result = run_command("/clear", session_state_no_manager, token_tracker)
 
     assert result is True
 
@@ -207,7 +216,7 @@ def test_clear_with_thread_manager_creates_new_thread(
     mock_print, mock_clear, session_state, token_tracker
 ):
     """Test /clear creates new thread and resets token tracker."""
-    result = handle_command("/clear", None, token_tracker, session_state)
+    result = run_command("/clear", session_state, token_tracker)
 
     assert result is True
 

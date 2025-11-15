@@ -516,3 +516,7 @@ async def main():
 
 asyncio.run(main())
 ```
+
+##CLI-Style
+
+![DeepAgents CLI Menu](DeepAgents-Menu-NEW.png)

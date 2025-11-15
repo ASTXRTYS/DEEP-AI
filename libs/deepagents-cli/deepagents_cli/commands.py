@@ -5,6 +5,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -16,6 +17,11 @@ from langsmith import Client
 from requests.exceptions import HTTPError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.shortcuts import CompleteStyle
+
 from deepagents.middleware.handoff_summarization import (
     MAX_REFINEMENT_ITERATIONS,
     HandoffSummary,
@@ -24,6 +30,7 @@ from deepagents.middleware.handoff_summarization import (
 )
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
+from .prompt_theme import build_thread_prompt_style
 from .handoff_persistence import apply_handoff_acceptance
 from .handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
@@ -318,6 +325,20 @@ def _print_thread_list(threads: list[dict], current_thread_id: str | None) -> No
     console.print()
 
 
+def _print_thread_info(thread: dict) -> None:
+    """Render thread metadata details."""
+
+    metadata = thread.get("metadata") or {}
+    console.print()
+    console.print(f"[bold]{thread.get('display_name') or thread.get('name') or '(unnamed)'}[/bold]")
+    console.print(f"ID: {thread['id']}")
+    console.print(f"Created: {thread.get('created')}")
+    console.print(f"Last used: {thread.get('last_used')}")
+    console.print(f"Parent: {thread.get('parent_id')}")
+    console.print(f"Metadata: {metadata}")
+    console.print()
+
+
 def _resolve_thread_identifier(identifier: str, threads: list[dict]) -> dict | None:
     """Resolve a numeric index or id prefix to a thread dict."""
     if not identifier:
@@ -337,7 +358,149 @@ def _resolve_thread_identifier(identifier: str, threads: list[dict]) -> dict | N
         return matches[0]
 
     return None
+def _thread_toolbar() -> list[tuple[str, str]]:
+    """Toolbar hint for the `/threads` selector."""
 
+    return [
+        ("class:threads-menu.hint-sep", "────────"),
+        ("", " "),
+        ("class:threads-menu.hint", "type number/id to filter"),
+        ("", "  "),
+        ("class:toolbar-green", "[Enter] switches"),
+        ("", "  "),
+        ("class:toolbar-orange", "[Esc] cancels"),
+    ]
+
+
+_THREAD_PROMPT_STYLE = build_thread_prompt_style()
+_THREAD_PROMPT_SESSION = PromptSession(style=_THREAD_PROMPT_STYLE, bottom_toolbar=_thread_toolbar)
+
+
+class _ThreadSelectionCompleter(Completer):
+    """PromptToolkit completer that surfaces threads inline."""
+
+    def __init__(self, threads: list[dict]):
+        self.entries: list[dict] = []
+        for idx, thread in enumerate(threads, start=1):
+            name = thread.get("display_name") or thread.get("name") or "(unnamed)"
+            preview_text = (thread.get("preview") or "No recent messages").replace("\n", " ")
+            trace_count = thread.get("trace_count")
+            trace_display = "?? traces" if trace_count is None else f"{trace_count} traces"
+            tokens = thread.get("langsmith_tokens", 0)
+            if tokens >= 1_000_000:
+                token_display = f"{tokens / 1_000_000:.1f}M tokens"
+            elif tokens >= 1_000:
+                token_display = f"{tokens / 1_000:.1f}K tokens"
+            else:
+                token_display = f"{tokens:,} tokens"
+            last_used = relative_time(thread.get("last_used", ""))
+            display = FormattedText(
+                [
+                    ("class:threads-menu.index", f"{idx:02d}"),
+                    ("", "  "),
+                    ("class:threads-menu.name", name),
+                    ("", " "),
+                    ("class:threads-menu.id", f"[{thread['id'][:8]}]"),
+                ]
+            )
+            meta_preview = preview_text[:70]
+            meta = FormattedText(
+                [
+                    ("class:threads-menu.meta-header", meta_preview),
+                    ("", "\n"),
+                    (
+                        "class:threads-menu.meta-footer",
+                        f"{trace_display} · {token_display} · {last_used}",
+                    ),
+                ]
+            )
+            self.entries.append(
+                {
+                    "token": str(idx),
+                    "display": display,
+                    "meta": meta,
+                    "search": f"{idx} {name.lower()} {thread['id']} {preview_text.lower()}",
+                    "thread": thread,
+                }
+            )
+
+    def get_completions(self, document, complete_event):  # type: ignore[override]
+        text = document.text_before_cursor.strip().lower()
+        for entry in self.entries:
+            if text and text not in entry["search"]:
+                continue
+            yield Completion(
+                entry["token"],
+                start_position=-len(document.text_before_cursor),
+                display=entry["display"],
+                display_meta=entry["meta"],
+            )
+
+
+async def _run_threads_dashboard(thread_manager, agent, initial_threads=None) -> bool:
+    """Leverage prompt_toolkit's default completion UI for thread selection."""
+
+    unused_agent = agent  # keep signature compatibility
+    threads = initial_threads or await _load_enriched_threads(thread_manager)
+    if not threads:
+        console.print("[yellow]No threads available. Use /new to create one.[/yellow]")
+        console.print()
+        return True
+
+    if not (console.is_terminal and sys.stdin.isatty()):
+        _print_thread_list(threads, thread_manager.get_current_thread_id())
+        return True
+
+    completer = _ThreadSelectionCompleter(threads)
+
+    def _prompt() -> str:
+        def pre_run() -> None:
+            buffer = _THREAD_PROMPT_SESSION.app.current_buffer
+            buffer.start_completion(select_first=True)
+
+        message = FormattedText([("class:prompt", "/threads ")])
+
+        return _THREAD_PROMPT_SESSION.prompt(
+            message,
+            completer=completer,
+            complete_while_typing=True,
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            reserve_space_for_menu=min(len(threads) + 4, 16),
+            pre_run=pre_run,
+        )
+
+    try:
+        selection = await asyncio.to_thread(_prompt)
+    except (EOFError, KeyboardInterrupt):  # pragma: no cover - user cancelled
+        console.print()
+        return True
+
+    selection = selection.strip()
+    if not selection:
+        console.print()
+        return True
+
+    target = None
+    if selection.isdigit():
+        idx = int(selection)
+        if 1 <= idx <= len(threads):
+            target = threads[idx - 1]
+    if not target:
+        target = _resolve_thread_identifier(selection, threads)
+
+    if not target:
+        console.print(f"[red]Thread '{selection}' not found.[/red]")
+        console.print()
+        return True
+
+    thread_manager.switch_thread(target["id"])
+    display_name = target.get("display_name") or target.get("name") or "(unnamed)"
+    console.print()
+    console.print(
+        f"[{COLORS['primary']}]✓ Switched to thread: {display_name} ({target['id'][:8]})[/{COLORS['primary']}]"
+    )
+    console.print()
+    return True
 
 async def _load_enriched_threads(thread_manager) -> list[dict]:
     """Load threads with LangSmith metrics and server previews."""
@@ -367,7 +530,13 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
     threads = await _load_enriched_threads(thread_manager)
     current_id = thread_manager.get_current_thread_id()
 
-    if not parts or parts[0].lower() == "list":
+    if not parts:
+        if console.is_terminal and sys.stdin.isatty():
+            return await _run_threads_dashboard(thread_manager, agent, threads)
+        _print_thread_list(threads, current_id)
+        return True
+
+    if parts[0].lower() == "list":
         _print_thread_list(threads, current_id)
         return True
 
@@ -454,17 +623,7 @@ async def handle_thread_commands_async(args: str, thread_manager, agent) -> bool
         target = require_target()
         if not target:
             return True
-        metadata = target.get("metadata") or {}
-        console.print()
-        console.print(
-            f"[bold]{target.get('display_name') or target.get('name') or '(unnamed)'}[/bold]"
-        )
-        console.print(f"ID: {target['id']}")
-        console.print(f"Created: {target.get('created')}")
-        console.print(f"Last used: {target.get('last_used')}")
-        console.print(f"Parent: {target.get('parent_id')}")
-        console.print(f"Metadata: {metadata}")
-        console.print()
+        _print_thread_info(target)
         return True
 
     console.print("[yellow]Unknown /threads subcommand.[/yellow]")

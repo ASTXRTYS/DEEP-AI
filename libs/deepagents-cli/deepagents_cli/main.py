@@ -223,7 +223,7 @@ async def simple_cli(
 
     console.print(
         "  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, "
-        "Ctrl+M for menu, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
+        "Ctrl+T to toggle auto-approve, Ctrl+C to interrupt",
         style=f"dim {COLORS['dim']}",
     )
     console.print()

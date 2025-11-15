@@ -52,7 +52,7 @@ class MenuSystem:
 
         # Show header with branding
         console.print()
-        header = create_header_panel(f"{Icons.AGENT} DEEP AGENTS", "Main Menu (Ctrl+M)")
+        header = create_header_panel(f"{Icons.AGENT} DEEP AGENTS", "Main Menu")
         console.print(header)
         console.print()
 

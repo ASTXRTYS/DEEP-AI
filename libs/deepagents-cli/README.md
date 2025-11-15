@@ -4,6 +4,16 @@ This is the CLI for deepagents
 
 ## Development
 
+### CLI UI conventions
+
+- Prompt-toolkit surfaces (REPL, `/threads`, new dialogs) must import the
+  shared theme from `deepagents_cli.prompt_theme`. The concrete checklist lives
+  in [`STYLEGUIDE.md`](STYLEGUIDE.md). Review it before adding or modifying
+  interactive UI so we preserve the current look-and-feel.
+- Visual reference screenshots (`Deepagents-menu.png`, `Deep-Agent-home-page.png`,
+  `Threads-menu.png`) are checked into the repo root. Compare against them if
+  you change styles or add new menus.
+
 ### Running Tests
 
 To run the test suite:

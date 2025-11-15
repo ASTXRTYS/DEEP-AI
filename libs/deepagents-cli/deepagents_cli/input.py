@@ -20,6 +20,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 
 from .config import COLORS, COMMANDS, SessionState, console
+from .prompt_theme import BASE_PROMPT_STYLE
 
 # Regex patterns for context-aware completion
 AT_MENTION_RE = re.compile(r"@(?P<path>(?:[^\s@]|(?<=\\)\s)*)$")
@@ -228,13 +229,6 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         # Force UI refresh to update toolbar
         event.app.invalidate()
 
-    # Bind Ctrl+M to open main menu
-    @kb.add("c-m")
-    def _(event) -> None:
-        """Open main menu."""
-        session_state.menu_requested = True
-        event.app.exit()  # Exit current prompt to trigger menu in main loop
-
     # Bind regular Enter to submit (intuitive behavior)
     @kb.add("enter")
     def _(event) -> None:
@@ -291,18 +285,6 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
             # Retrigger completion
             buffer.start_completion(select_first=False)
 
-    from prompt_toolkit.styles import Style
-
-    # Define styles for the toolbar with full-width background colors
-    toolbar_style = Style.from_dict(
-        {
-            "bottom-toolbar": "noreverse",  # Disable default reverse video
-            "toolbar-green": "bg:#10b981 #000000",  # Green for auto-accept ON
-            "toolbar-orange": "bg:#f59e0b #000000",  # Orange for manual accept
-            "toolbar-exit": "bg:#2563eb #ffffff",  # Blue for exit hint
-        }
-    )
-
     # Create session reference dict for toolbar to access session
     session_ref = {}
 
@@ -320,7 +302,7 @@ def create_prompt_session(assistant_id: str, session_state: SessionState) -> Pro
         bottom_toolbar=get_bottom_toolbar(
             session_state, session_ref
         ),  # Persistent status bar at bottom
-        style=toolbar_style,  # Apply toolbar styling
+        style=BASE_PROMPT_STYLE,  # Shared theme across prompts
         reserve_space_for_menu=7,  # Reserve space for completion menu to show 5-6 results
     )
 

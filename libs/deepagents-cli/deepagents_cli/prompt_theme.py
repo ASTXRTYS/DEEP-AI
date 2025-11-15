@@ -39,11 +39,13 @@ BASE_PROMPT_STYLE = Style.from_dict(
         "threads-menu.index": "#67e8f9 bold",
         "threads-menu.name": "#ecfccb bold",
         "threads-menu.id": "#94a3b8",
-        # Meta preview panel for the currently selected thread. Use a
-        # dedicated gray band with light text so the "Hello, I'm here
-        # to help..." preview is crisp and legible above the toolbar.
-        "threads-menu.meta-header": "bg:#111827 #e5e7eb",
-        "threads-menu.meta-footer": "bg:#111827 #9ca3af",
+        # Meta preview panel for the selected thread. Match the main
+        # slash-command menu aesthetic so the preview feels like part
+        # of the same system.
+        # Header: brighter aqua text on deep green (like completion meta).
+        "threads-menu.meta-header": "bg:#05241c #a7f3d0",
+        # Footer: slightly darker band with dimmer text for stats/time.
+        "threads-menu.meta-footer": "bg:#041f1a #94a3b8",
         # Minimal toolbar hint styling (transparent background, darker bold text)
         "threads-menu.hint": "#0f9d7a bold",
         # Subtle separator under the `/threads` picker; use the shared

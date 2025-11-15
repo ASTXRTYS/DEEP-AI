@@ -17,6 +17,12 @@ menus, slash-command dialogs) uses the same palette and UX affordances.
 - **Completions:** Prefer `CompleteStyle.MULTI_COLUMN` with
   `FormattedText` entries for display + `display_meta` so we can show multi-line
   previews, stats, or shortcuts that match the palette.
+- **Threads dashboard:** The `/threads` selector reuses the main slash-command
+  menu palette for its preview band (`threads-menu.meta-header` /
+  `threads-menu.meta-footer`) and a dedicated bottom toolbar band via
+  `build_thread_prompt_style()`. When tweaking colors, keep those three layers
+  (grid, preview, toolbar) visually cohesive and aligned with the base
+  completion-menu colors.
 - **Prompt sessions:** Reuse an existing `PromptSession` when possible. When a
   dedicated session is necessary, instantiate it with the shared style module
   and reuse the same key bindings/toolbar semantics.

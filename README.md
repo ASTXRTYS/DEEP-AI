@@ -46,6 +46,10 @@ The DeepAgents CLI expects a LangGraph server to be running for thread managemen
    deepagents
    ```
 
+You should see a home screen similar to:
+
+![DeepAgents CLI home screen](CLI-HomePage.JPG)
+
 If the CLI cannot reach the server it will exit with guidance to start it manually, so always launch `langgraph dev` first when working locally.
 
 ## Usage
@@ -517,6 +521,4 @@ async def main():
 asyncio.run(main())
 ```
 
-##CLI-Style
-
-![DeepAgents CLI Menu](DeepAgents-Menu-NEW.png)
+ 

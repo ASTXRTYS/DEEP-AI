@@ -10,9 +10,9 @@ This is the CLI for deepagents
   shared theme from `deepagents_cli.prompt_theme`. The concrete checklist lives
   in [`STYLEGUIDE.md`](STYLEGUIDE.md). Review it before adding or modifying
   interactive UI so we preserve the current look-and-feel.
-- Visual reference screenshots (`Deepagents-menu.png`, `Deep-Agent-home-page.png`,
-  `Threads-menu.png`) are checked into the repo root. Compare against them if
-  you change styles or add new menus.
+- Visual reference screenshots (`CLI-HomePage.JPG`, `CLI-Main-Menu.JPG`,
+  `CLI-Thread-Picker.JPG`) are checked into the repo root. Compare against
+  them if you change styles or add new menus.
 
 ### Running Tests
 

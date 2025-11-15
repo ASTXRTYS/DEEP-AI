@@ -37,9 +37,14 @@ menus, slash-command dialogs) uses the same palette and UX affordances.
 
 ## Screenshot reference
 
-The expected look for the CLI home screen and `/threads` selector is captured in
-`docs/images/DeepAgents-Menu-NEW.png` (see repo root). Use it as visual QA when
-introducing new UI.
+The expected look for the CLI home screen, main command menu, and `/threads`
+selector is captured in the root-level screenshots:
+
+- `CLI-HomePage.JPG` – landing state after connecting to the LangGraph server.
+- `CLI-Main-Menu.JPG` – slash-command menu (`/help`, `/new`, etc.).
+- `CLI-Thread-Picker.JPG` – interactive thread selector with preview band.
+
+Use these as visual QA when introducing new UI or tweaking styles.
 
 ## Checklist for new UI code
 

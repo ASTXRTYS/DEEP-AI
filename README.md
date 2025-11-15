@@ -52,6 +52,8 @@ You should see a home screen similar to:
 
 If the CLI cannot reach the server it will exit with guidance to start it manually, so always launch `langgraph dev` first when working locally.
 
+> **Deep-Ai banner experiments:** We are actively A/B testing alternative splash banners via CLI flags (`--v1`, `--v2`, …). See [`libs/deepagents-cli/BANNER_EXPERIMENTS.md`](libs/deepagents-cli/BANNER_EXPERIMENTS.md) for the current assignments, workflow, and how they tie into the CLI styling guide.
+
 ## Usage
 
 (To run the example below, you will need to `pip install tavily-python`).

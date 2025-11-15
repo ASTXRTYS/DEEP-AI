@@ -20,7 +20,7 @@ COLORS = {
     "tool": "#fbbf24",
 }
 
-# ASCII art banner
+# ASCII art banner (default - current Deep Agents branding)
 DEEP_AGENTS_ASCII = """
  ██████╗  ███████╗ ███████╗ ██████╗
  ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗
@@ -36,6 +36,93 @@ DEEP_AGENTS_ASCII = """
  ██║  ██║ ╚██████╔╝ ███████╗ ██║ ╚████║    ██║    ███████║
  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝ ╚═╝  ╚═══╝    ╚═╝    ╚══════╝
 """
+
+# Experimental Deep-Ai banner variants.
+# These are opt-in via CLI flags (e.g., --v1, --v2, ...).
+DEEP_AI_ASCII_V1 = r"""
+ ██████╗  ███████╗ ███████╗ ██████╗
+ ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗
+ ██║  ██║ █████╗   █████╗   ██████╔╝
+ ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝
+ ██████╔╝ ███████╗ ███████╗ ██║
+ ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝
+
+  █████╗        ██╗
+ ██╔══██╗       ██║
+ ███████║       ██║
+ ██╔══██║       ██║
+ ██║  ██║       ██║
+ ╚═╝  ╚═╝       ╚═╝
+"""
+
+DEEP_AI_ASCII_V2 = r"""
+DeepAI banner variant slot (v2).
+"""
+
+DEEP_AI_ASCII_V3 = r"""
+Deep-Ai banner variant slot (v3).
+"""
+
+DEEP_AI_ASCII_V4 = r"""
+[bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/bright_cyan]      [cyan] █████╗[/cyan]        [#10b981]██╗[/#10b981]
+[bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bright_cyan]    [cyan]██╔══██╗[/cyan]       [#10b981]██║[/#10b981]
+[bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/bright_cyan]    [cyan]███████║[/cyan]       [#10b981]██║[/#10b981]
+[cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/cyan]     [#10b981]██╔══██║[/#10b981]       [#10b981]██║[/#10b981]
+[cyan] ██████╔╝ ███████╗ ███████╗ ██║[/cyan]         [#10b981]██║  ██║[/#10b981]       [#10b981]██║[/#10b981]
+[cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/cyan]         [#10b981]╚═╝  ╚═╝[/#10b981]       [#10b981]╚═╝[/#10b981]
+"""
+
+DEEP_AI_ASCII_V5 = r"""
+[bold bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/bold bright_cyan]      [bold bright_magenta] █████╗        ██╗[/bold bright_magenta]
+[bold bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bold bright_cyan]    [bold bright_magenta]██╔══██╗       ██║[/bold bright_magenta]
+[bold bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/bold bright_cyan]    [bold bright_magenta]███████║       ██║[/bold bright_magenta]
+[bold bright_cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/bold bright_cyan]     [bold bright_magenta]██╔══██║       ██║[/bold bright_magenta]
+[bold bright_cyan] ██████╔╝ ███████╗ ███████╗ ██║[/bold bright_cyan]         [bold bright_magenta]██║  ██║       ██║[/bold bright_magenta]
+[bold bright_cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/bold bright_cyan]         [bold bright_magenta]╚═╝  ╚═╝       ╚═╝[/bold bright_magenta]
+"""
+
+DEEP_AI_ASCII_V6 = r"""
+[bold yellow on black] ██████╗  ███████╗ ███████╗ ██████╗ [/bold yellow on black]     [bold bright_yellow on black] █████╗        ██╗[/bold bright_yellow on black]
+[bold yellow on black] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bold yellow on black]    [bold bright_yellow on black]██╔══██╗       ██║[/bold bright_yellow on black]
+[bold bright_yellow on black] ██║  ██║ █████╗   █████╗   ██████╔╝[/bold bright_yellow on black]    [bold bright_white on black]███████║       ██║[/bold bright_white on black]
+[bold bright_yellow on black] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/bold bright_yellow on black]     [bold bright_white on black]██╔══██║       ██║[/bold bright_white on black]
+[bold bright_white on black] ██████╔╝ ███████╗ ███████╗ ██║[/bold bright_white on black]         [bold bright_white on black]██║  ██║       ██║[/bold bright_white on black]
+[bold bright_white on black] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/bold bright_white on black]         [bold bright_white on black]╚═╝  ╚═╝       ╚═╝[/bold bright_white on black]
+"""
+
+DEEP_AI_ASCII_V7 = r"""
+[dim bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/dim bright_cyan]      [white] █████╗        ██╗[/white]
+[dim bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/dim bright_cyan]    [white]██╔══██╗       ██║[/white]
+[dim bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/dim bright_cyan]    [bold white]███████║       ██║[/bold white]
+[dim bright_cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/dim bright_cyan]     [bold white]██╔══██║       ██║[/bold white]
+[dim cyan] ██████╔╝ ███████╗ ███████╗ ██║[/dim cyan]         [bold white]██║  ██║       ██║[/bold white]
+[dim cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/dim cyan]         [bold white]╚═╝  ╚═╝       ╚═╝[/bold white]
+"""
+
+BANNER_VARIANTS: dict[str, str] = {
+    "v1": DEEP_AI_ASCII_V1,
+    "v2": DEEP_AI_ASCII_V2,
+    "v3": DEEP_AI_ASCII_V3,
+    "v4": DEEP_AI_ASCII_V4,
+    "v5": DEEP_AI_ASCII_V5,
+    "v6": DEEP_AI_ASCII_V6,
+    "v7": DEEP_AI_ASCII_V7,
+}
+
+
+def get_banner_ascii(banner_variant: str | None) -> str:
+    """Return the appropriate banner ASCII art for the given variant.
+
+    Args:
+        banner_variant: Variant key such as "v1", "v2", etc., or None.
+
+    Returns:
+        ASCII art string for the selected banner. Defaults to DEEP_AGENTS_ASCII
+        when no variant (or an unknown variant) is provided.
+    """
+    if not banner_variant:
+        return DEEP_AGENTS_ASCII
+    return BANNER_VARIANTS.get(banner_variant, DEEP_AGENTS_ASCII)
 
 # Interactive commands (shown in autocomplete)
 # Only essential, high-signal commands are listed here for clean UX.
@@ -79,9 +166,15 @@ USE_ASYNC_CHECKPOINTER = os.getenv("DEEPAGENTS_USE_ASYNC_CHECKPOINTER", "1") in 
 class SessionState:
     """Holds mutable session state (auto-approve mode, thread manager, etc)."""
 
-    def __init__(self, auto_approve: bool = False, thread_manager: Any | None = None) -> None:
+    def __init__(
+        self,
+        auto_approve: bool = False,
+        thread_manager: Any | None = None,
+        banner_variant: str | None = None,
+    ) -> None:
         self.auto_approve = auto_approve
         self.thread_manager = thread_manager
+        self.banner_variant = banner_variant
         self.model = None
         self.pending_handoff_child_id: str | None = None  # Deferred handoff target
         self.menu_requested: bool = False  # Reserved for manual menu triggers

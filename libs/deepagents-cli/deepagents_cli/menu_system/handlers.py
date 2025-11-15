@@ -337,7 +337,7 @@ class MenuHandlers:
     async def handle_help(self, context: dict) -> None:
         """Handle showing help."""
         console.print()
-        show_help()
+        show_help(self.session_state.banner_variant)
         console.print()
 
         await questionary.press_any_key_to_continue(

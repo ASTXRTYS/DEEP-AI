@@ -29,7 +29,7 @@ from deepagents.middleware.handoff_summarization import (
     select_messages_for_summary,
 )
 
-from .config import COLORS, DEEP_AGENTS_ASCII, console
+from .config import COLORS, console, get_banner_ascii
 from .prompt_theme import build_thread_prompt_style
 from .handoff_persistence import apply_handoff_acceptance
 from .handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
@@ -928,7 +928,10 @@ async def handle_command(
 
             # Clear screen and show fresh UI
             console.clear()
-            console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+            console.print(
+                get_banner_ascii(getattr(session_state, "banner_variant", None)),
+                style=f"bold {COLORS['primary']}",
+            )
             console.print()
             console.print(
                 f"... Fresh start! Created new thread: {new_thread_id[:8]}", style=COLORS["agent"]
@@ -939,7 +942,10 @@ async def handle_command(
             # IMPORTANT: Never replace the checkpointer with InMemorySaver as it breaks persistence
             token_tracker.reset()
             console.clear()
-            console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+            console.print(
+                get_banner_ascii(getattr(session_state, "banner_variant", None) if session_state else None),
+                style=f"bold {COLORS['primary']}",
+            )
             console.print()
             console.print(
                 "[yellow]Warning: Thread manager not available. Use /new to create a fresh thread.[/yellow]",

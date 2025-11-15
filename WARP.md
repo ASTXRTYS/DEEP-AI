@@ -1,15 +1,22 @@
 # WARP.md
 
-I want to focus on the aestetics of the deepagents-cli app and to do so i have provided you with .png files of the
-cli and what it looks like currently so that you may know exactley what i mean. 
+› /prompts:dev I want to focus on the aesthetics and visual re-brand of the `deepagents-cli` app. I’ve provided
+  `.png` screenshots of the current CLI so we stay visually aligned while iterating on the design.
+The first focus of this re-brand is the **main banner**, which currently reads “Deep Agents”. The initial
+  toolkit/python-prompt-toolkit covers prompt_toolkit CLIs. We are actively A/B testing multiple “Deep-Ai” banner variants using CLI flags (`--v1`, `--v2`, `--v3`,
+  `--v4`, `--v5`, etc.). The default run (`deepagents`) keeps the existing “Deep Agents” banner, while each
+  `--vN` flag switches the session to a specific experimental Deep-Ai banner for visual comparison. For this
+  pass, you'll need to overwrite what the previous agent did under the flags V1, V2, V3, V4. Those are going to
+  be the flags that I'm gonna be dedicating to you, but the previous agent already used those flags, so any
+  code that you write is going to have to overwrite what they did. Essentially, you'll just be deleting
+  everything that they did under those flags and then you'll be replacing it with your iteration.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
- 
-  i should note that we need to follow the same pattern and convention for prompt toolkit being applied currently in the repo.
- 
-  to help you with that mandate i have provided you with the indexed open source lib of the prompt toolkit repo that you can query
-  a chat bot that can answer any and all questions you may need to ask to achieve your task. when using the deepwiki for this
-  task the relevant deepwiki to query is: https://deepwiki.com/prompt-toolkit/python-prompt-toolkit
+I want to focus on the aesthetics and visual re-brand of the `deepagents-cli` app. I’ve provided `.png` screenshots of the current CLI so we stay visually aligned while iterating on the design.
+The first focus of this re-brand is the **main banner**, which currently reads “Deep Agents”. The initial rebrand step is to change this banner to “Deep-Ai”, which will be the new name of this CLI app.
+To support this work, you have access to an indexed open-source https://deepwiki.com/ASTXRTYS/Python-TUI-INDEX/tree/main/cement For this task, the **most relevant DeepWiki indexes** are the Python TUI index (`ASTXRTYS/Python-TUI-INDEX`), which covers idiomatic patterns for Rich & https://deepwiki.com/prompt-toolkit/python-prompt-toolkit covers prompt_toolkit CLIs.
+We are actively A/B testing multiple “Deep-Ai” banner variants using CLI flags (`--v1`, `--v2`, `--v3`, `--v4`, `--v5`, etc.). The default run (`deepagents`) keeps the existing “Deep Agents” banner, while each `--vN` flag switches the session to a specific experimental Deep-Ai banner for visual comparison.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This file provides guidance to WARP (warp.dev) when working with code in this repository.
 

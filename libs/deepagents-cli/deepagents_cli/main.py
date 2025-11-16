@@ -9,7 +9,7 @@ from deepagents_cli.agent import create_agent_with_config, list_agents, reset_ag
 from deepagents_cli.commands import execute_bash_command, handle_command
 from deepagents_cli.config import (
     COLORS,
-    DEEP_AGENTS_ASCII,
+    get_banner_ascii,
     SessionState,
     console,
     create_model,
@@ -121,6 +121,15 @@ def parse_args(argv: list[str] | None = None):
         action="store_true",
         help="Auto-approve tool usage without prompting (disables human-in-the-loop)",
     )
+    # Banner variant flags for visual experimentation.
+    # These are intentionally hidden from -h output to keep help concise.
+    parser.add_argument("--v1", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v2", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v3", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v4", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v5", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v6", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--v7", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--sandbox",
         choices=["none", "modal", "daytona", "runloop"],
@@ -142,7 +151,27 @@ def parse_args(argv: list[str] | None = None):
         help="Show this help message and exit (same as 'deepagents help').",
     )
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # Derive banner variant from flags. Default is None (use built-in banner).
+    banner_variant: str | None = None
+    if getattr(args, "v1", False):
+        banner_variant = "v1"
+    elif getattr(args, "v2", False):
+        banner_variant = "v2"
+    elif getattr(args, "v3", False):
+        banner_variant = "v3"
+    elif getattr(args, "v4", False):
+        banner_variant = "v4"
+    elif getattr(args, "v5", False):
+        banner_variant = "v5"
+    elif getattr(args, "v6", False):
+        banner_variant = "v6"
+    elif getattr(args, "v7", False):
+        banner_variant = "v7"
+
+    setattr(args, "banner_variant", banner_variant)
+    return args
 
 
 async def simple_cli(
@@ -164,7 +193,14 @@ async def simple_cli(
         setup_script_path: Path to setup script that was run (if any)
     """
     console.clear()
-    console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+    banner_variant = getattr(session_state, "banner_variant", None)
+    banner = get_banner_ascii(banner_variant)
+    # Only apply style to default banner (no inline markup)
+    # Variant banners (v1-v7) have their own inline Rich markup
+    if banner_variant is None:
+        console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+    else:
+        console.print(banner, no_wrap=True, overflow="ignore", crop=False)
     console.print()
 
     if backend and isinstance(backend, SandboxBackendProtocol):
@@ -476,14 +512,17 @@ def cli_main() -> None:
         args = parse_args()
 
         if args.command == "help":
-            show_help()
+            show_help(args.banner_variant)
         elif args.command == "list":
             list_agents()
         elif args.command == "reset":
             reset_agent(args.agent, args.source_agent)
         else:
             # Create session state from args
-            session_state = SessionState(auto_approve=args.auto_approve)
+            session_state = SessionState(
+                auto_approve=args.auto_approve,
+                banner_variant=args.banner_variant,
+            )
 
             # API key validation happens in create_model()
             asyncio.run(

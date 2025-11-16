@@ -11,7 +11,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from .config import COLORS, COMMANDS, DEEP_AGENTS_ASCII, MAX_ARG_LENGTH, console
+from .config import COLORS, COMMANDS, MAX_ARG_LENGTH, console, get_banner_ascii
 from .file_ops import FileOperationRecord
 
 
@@ -534,10 +534,16 @@ def show_interactive_help() -> None:
     console.print()
 
 
-def show_help() -> None:
+def show_help(banner_variant: str | None = None) -> None:
     """Show help information."""
     console.print()
-    console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
+    banner = get_banner_ascii(banner_variant)
+    # Only apply style to default banner (no inline markup)
+    # Variant banners (v1-v7) have their own inline Rich markup
+    if banner_variant is None:
+        console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+    else:
+        console.print(banner, no_wrap=True, overflow="ignore", crop=False)
     console.print()
 
     console.print("[bold]Usage:[/bold]", style=COLORS["primary"])

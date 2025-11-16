@@ -193,10 +193,14 @@ async def simple_cli(
         setup_script_path: Path to setup script that was run (if any)
     """
     console.clear()
-    console.print(
-        get_banner_ascii(getattr(session_state, "banner_variant", None)),
-        style=f"bold {COLORS['primary']}",
-    )
+    banner_variant = getattr(session_state, "banner_variant", None)
+    banner = get_banner_ascii(banner_variant)
+    # Only apply style to default banner (no inline markup)
+    # Variant banners (v1-v7) have their own inline Rich markup
+    if banner_variant is None:
+        console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+    else:
+        console.print(banner, no_wrap=True, overflow="ignore", crop=False)
     console.print()
 
     if backend and isinstance(backend, SandboxBackendProtocol):

@@ -1,4 +1,79 @@
-(Rule-Based Section Divider)** and (Custom Renderable with Protocol)** with advanced concepts applied.<cite/>
+# DeepAgents Rich TUI How-To Guide
+
+**Quick Reference:** Advanced Rich rendering techniques, creative branding patterns, and terminal UI best practices for the DeepAgents CLI.
+
+## Creative Branding Quick Start
+
+### Smooth Horizontal Gradients with GradientBanner Pattern
+
+**The Right Way:** Use Rich's `blend_rgb()` with custom renderable for per-character horizontal gradients.
+
+```python
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.color import Color, blend_rgb
+from rich.color_triplet import ColorTriplet
+from rich.segment import Segment
+from rich.style import Style
+
+class GradientBanner:
+    """Horizontal gradient banner using Rich's blend_rgb()."""
+
+    def __init__(self, lines: list[str], color_stops: list[tuple[float, tuple[int, int, int]]]):
+        self.lines = lines
+        self.color_stops = sorted(color_stops, key=lambda x: x[0])
+
+    def _interpolate_color(self, position: float) -> ColorTriplet:
+        """Use blend_rgb() to interpolate between color stops."""
+        position = max(0.0, min(1.0, position))
+
+        for i in range(len(self.color_stops) - 1):
+            pos1, color1 = self.color_stops[i]
+            pos2, color2 = self.color_stops[i + 1]
+
+            if pos1 <= position <= pos2:
+                ratio = (position - pos1) / (pos2 - pos1) if pos2 != pos1 else 0
+                return blend_rgb(ColorTriplet(*color1), ColorTriplet(*color2), ratio)
+
+        return ColorTriplet(*self.color_stops[-1][1])
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """CRITICAL: Calculate position per-line for HORIZONTAL gradient."""
+        for line in self.lines:
+            line_length = len(line)
+
+            for char_index, char in enumerate(line):
+                # ✅ Horizontal: position within THIS line (0.0 to 1.0)
+                position = char_index / line_length if line_length > 0 else 0
+                color_triplet = self._interpolate_color(position)
+                yield Segment(char, Style(color=Color.from_triplet(color_triplet)))
+
+            yield Segment.line()
+
+# Usage
+banner = GradientBanner(
+    lines=["Your ASCII", "Art Here"],
+    color_stops=[
+        (0.0, (57, 255, 20)),    # Neon green (left)
+        (0.5, (255, 100, 0)),    # Orange (middle)
+        (1.0, (139, 0, 0)),      # Blood red (right)
+    ]
+)
+console.print(banner)
+```
+
+**Critical Points:**
+- ✅ Use `blend_rgb()` from Rich, not manual RGB math
+- ✅ Calculate position per-line: `char_index / line_length` (horizontal)
+- ❌ NOT `char_count / total_chars` (that creates vertical gradient)
+- ✅ 4-6 color stops is plenty - `blend_rgb()` handles smooth interpolation
+
+---
+
+## Rich Advanced Examples
+
+Below are comprehensive examples of Rich rendering techniques, collected from DeepWiki queries and production implementations.
+
+### (Rule-Based Section Divider)** and (Custom Renderable with Protocol)** with advanced concepts applied.<cite/>
 
 ## Approach : Advanced Rule-Based Banner
 

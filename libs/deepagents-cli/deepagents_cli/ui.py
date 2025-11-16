@@ -537,10 +537,13 @@ def show_interactive_help() -> None:
 def show_help(banner_variant: str | None = None) -> None:
     """Show help information."""
     console.print()
-    console.print(
-        get_banner_ascii(banner_variant),
-        style=f"bold {COLORS['primary']}",
-    )
+    banner = get_banner_ascii(banner_variant)
+    # Only apply style to default banner (no inline markup)
+    # Variant banners (v1-v7) have their own inline Rich markup
+    if banner_variant is None:
+        console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+    else:
+        console.print(banner, no_wrap=True, overflow="ignore", crop=False)
     console.print()
 
     console.print("[bold]Usage:[/bold]", style=COLORS["primary"])

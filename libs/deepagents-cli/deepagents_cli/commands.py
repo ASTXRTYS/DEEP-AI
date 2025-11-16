@@ -928,10 +928,14 @@ async def handle_command(
 
             # Clear screen and show fresh UI
             console.clear()
-            console.print(
-                get_banner_ascii(getattr(session_state, "banner_variant", None)),
-                style=f"bold {COLORS['primary']}",
-            )
+            banner_variant = getattr(session_state, "banner_variant", None)
+            banner = get_banner_ascii(banner_variant)
+            # Only apply style to default banner (no inline markup)
+            # Variant banners (v1-v7) have their own inline Rich markup
+            if banner_variant is None:
+                console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+            else:
+                console.print(banner, no_wrap=True, overflow="ignore", crop=False)
             console.print()
             console.print(
                 f"... Fresh start! Created new thread: {new_thread_id[:8]}", style=COLORS["agent"]
@@ -942,10 +946,14 @@ async def handle_command(
             # IMPORTANT: Never replace the checkpointer with InMemorySaver as it breaks persistence
             token_tracker.reset()
             console.clear()
-            console.print(
-                get_banner_ascii(getattr(session_state, "banner_variant", None) if session_state else None),
-                style=f"bold {COLORS['primary']}",
-            )
+            banner_variant = getattr(session_state, "banner_variant", None) if session_state else None
+            banner = get_banner_ascii(banner_variant)
+            # Only apply style to default banner (no inline markup)
+            # Variant banners (v1-v7) have their own inline Rich markup
+            if banner_variant is None:
+                console.print(banner, style=f"bold {COLORS['primary']}", no_wrap=True, overflow="ignore", crop=False)
+            else:
+                console.print(banner, no_wrap=True, overflow="ignore", crop=False)
             console.print()
             console.print(
                 "[yellow]Warning: Thread manager not available. Use /new to create a fresh thread.[/yellow]",

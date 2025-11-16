@@ -1,12 +1,17 @@
 """Configuration, constants, and model creation for the CLI."""
 
+import colorsys
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import dotenv
-from rich.console import Console
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.color import Color, blend_rgb
+from rich.color_triplet import ColorTriplet
+from rich.segment import Segment
+from rich.style import Style
 
 dotenv.load_dotenv()
 
@@ -39,65 +44,267 @@ DEEP_AGENTS_ASCII = """
 
 # Experimental Deep-Ai banner variants.
 # These are opt-in via CLI flags (e.g., --v1, --v2, ...).
-DEEP_AI_ASCII_V1 = r"""
- ██████╗  ███████╗ ███████╗ ██████╗
- ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗
- ██║  ██║ █████╗   █████╗   ██████╔╝
- ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝
- ██████╔╝ ███████╗ ███████╗ ██║
- ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝
 
-  █████╗        ██╗
- ██╔══██╗       ██║
- ███████║       ██║
- ██╔══██║       ██║
- ██║  ██║       ██║
- ╚═╝  ╚═╝       ╚═╝
-"""
+class GradientBanner:
+    """Custom renderable for smooth per-character gradient banners with color stops.
 
-DEEP_AI_ASCII_V2 = r"""
-DeepAI banner variant slot (v2).
-"""
+    Uses Rich's __rich_console__() protocol to yield Segment objects with
+    programmatically calculated colors for each character position, creating
+    smooth gradient transitions through multiple color stops.
+    """
 
-DEEP_AI_ASCII_V3 = r"""
-Deep-Ai banner variant slot (v3).
-"""
+    def __init__(self, lines: list[str], color_stops: list[tuple[float, tuple[int, int, int]]]):
+        """Initialize multi-stage gradient banner.
 
-DEEP_AI_ASCII_V4 = r"""
-[bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/bright_cyan]      [cyan] █████╗[/cyan]        [#10b981]██╗[/#10b981]
-[bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bright_cyan]    [cyan]██╔══██╗[/cyan]       [#10b981]██║[/#10b981]
-[bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/bright_cyan]    [cyan]███████║[/cyan]       [#10b981]██║[/#10b981]
-[cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/cyan]     [#10b981]██╔══██║[/#10b981]       [#10b981]██║[/#10b981]
-[cyan] ██████╔╝ ███████╗ ███████╗ ██║[/cyan]         [#10b981]██║  ██║[/#10b981]       [#10b981]██║[/#10b981]
-[cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/cyan]         [#10b981]╚═╝  ╚═╝[/#10b981]       [#10b981]╚═╝[/#10b981]
-"""
+        Args:
+            lines: List of ASCII art lines (without markup)
+            color_stops: List of (position, RGB) tuples where position is 0.0-1.0
+                        Example: [(0.0, (16,185,129)), (0.5, (0,255,136)), (1.0, (205,92,92))]
+        """
+        self.lines = lines
+        self.color_stops = sorted(color_stops, key=lambda x: x[0])
 
-DEEP_AI_ASCII_V5 = r"""
-[bold bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/bold bright_cyan]      [bold bright_magenta] █████╗        ██╗[/bold bright_magenta]
-[bold bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bold bright_cyan]    [bold bright_magenta]██╔══██╗       ██║[/bold bright_magenta]
-[bold bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/bold bright_cyan]    [bold bright_magenta]███████║       ██║[/bold bright_magenta]
-[bold bright_cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/bold bright_cyan]     [bold bright_magenta]██╔══██║       ██║[/bold bright_magenta]
-[bold bright_cyan] ██████╔╝ ███████╗ ███████╗ ██║[/bold bright_cyan]         [bold bright_magenta]██║  ██║       ██║[/bold bright_magenta]
-[bold bright_cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/bold bright_cyan]         [bold bright_magenta]╚═╝  ╚═╝       ╚═╝[/bold bright_magenta]
-"""
+    def _interpolate_color(self, position: float) -> ColorTriplet:
+        """Get interpolated RGB color at given position (0.0-1.0).
 
-DEEP_AI_ASCII_V6 = r"""
-[bold yellow on black] ██████╗  ███████╗ ███████╗ ██████╗ [/bold yellow on black]     [bold bright_yellow on black] █████╗        ██╗[/bold bright_yellow on black]
-[bold yellow on black] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/bold yellow on black]    [bold bright_yellow on black]██╔══██╗       ██║[/bold bright_yellow on black]
-[bold bright_yellow on black] ██║  ██║ █████╗   █████╗   ██████╔╝[/bold bright_yellow on black]    [bold bright_white on black]███████║       ██║[/bold bright_white on black]
-[bold bright_yellow on black] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/bold bright_yellow on black]     [bold bright_white on black]██╔══██║       ██║[/bold bright_white on black]
-[bold bright_white on black] ██████╔╝ ███████╗ ███████╗ ██║[/bold bright_white on black]         [bold bright_white on black]██║  ██║       ██║[/bold bright_white on black]
-[bold bright_white on black] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/bold bright_white on black]         [bold bright_white on black]╚═╝  ╚═╝       ╚═╝[/bold bright_white on black]
-"""
+        Uses Rich's blend_rgb() function for proper color interpolation.
+        """
+        # Clamp position to valid range
+        position = max(0.0, min(1.0, position))
 
-DEEP_AI_ASCII_V7 = r"""
-[dim bright_cyan] ██████╗  ███████╗ ███████╗ ██████╗[/dim bright_cyan]      [white] █████╗        ██╗[/white]
-[dim bright_cyan] ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗[/dim bright_cyan]    [white]██╔══██╗       ██║[/white]
-[dim bright_cyan] ██║  ██║ █████╗   █████╗   ██████╔╝[/dim bright_cyan]    [bold white]███████║       ██║[/bold white]
-[dim bright_cyan] ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝[/dim bright_cyan]     [bold white]██╔══██║       ██║[/bold white]
-[dim cyan] ██████╔╝ ███████╗ ███████╗ ██║[/dim cyan]         [bold white]██║  ██║       ██║[/bold white]
-[dim cyan] ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝[/dim cyan]         [bold white]╚═╝  ╚═╝       ╚═╝[/bold white]
-"""
+        # Find the two color stops to interpolate between
+        for i in range(len(self.color_stops) - 1):
+            pos1, color1 = self.color_stops[i]
+            pos2, color2 = self.color_stops[i + 1]
+
+            if pos1 <= position <= pos2:
+                # Calculate local ratio between these two stops
+                if pos2 - pos1 == 0:
+                    local_ratio = 0
+                else:
+                    local_ratio = (position - pos1) / (pos2 - pos1)
+
+                # Use Rich's blend_rgb() function
+                color1_triplet = ColorTriplet(*color1)
+                color2_triplet = ColorTriplet(*color2)
+                return blend_rgb(color1_triplet, color2_triplet, local_ratio)
+
+        # If position is beyond last stop, return last color
+        return ColorTriplet(*self.color_stops[-1][1])
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Yield Segment objects with per-character gradient colors.
+
+        Creates a HORIZONTAL gradient across each line (left to right),
+        not a vertical gradient down the banner.
+        """
+        for line in self.lines:
+            line_length = len(line)
+
+            for char_index, char in enumerate(line):
+                # Calculate position WITHIN THIS LINE (0.0 to 1.0)
+                # This creates a horizontal gradient, not vertical
+                position = char_index / line_length if line_length > 0 else 0
+
+                # Get interpolated color using Rich's blend_rgb()
+                color_triplet = self._interpolate_color(position)
+                color = Color.from_triplet(color_triplet)
+                yield Segment(char, Style(color=color))
+
+            # End of line
+            yield Segment.line()
+
+
+class HLSGradientBanner:
+    """Advanced gradient banner using HLS color space for smoother transitions.
+
+    Based on Rich's ColorBox implementation, this uses colorsys.hls_to_rgb()
+    for perceptually uniform gradients that avoid muddy mid-tones common in
+    RGB interpolation. Supports the half-block technique for double resolution.
+    """
+
+    def __init__(self, lines: list[str], hue_range: tuple[float, float],
+                 lightness_range: tuple[float, float], saturation: float = 1.0,
+                 use_half_blocks: bool = False):
+        """Initialize HLS-based gradient banner.
+
+        Args:
+            lines: List of ASCII art lines
+            hue_range: (start_hue, end_hue) where 0.0-1.0 represents the color wheel
+                      Examples: 0.0=red, 0.33=green, 0.67=blue
+            lightness_range: (start_lightness, end_lightness) where 0.0=black, 1.0=white
+            saturation: Color saturation (0.0=grayscale, 1.0=full color)
+            use_half_blocks: Use "▄" with dual colors for 2x vertical resolution
+        """
+        self.lines = lines
+        self.hue_start, self.hue_end = hue_range
+        self.light_start, self.light_end = lightness_range
+        self.saturation = saturation
+        self.use_half_blocks = use_half_blocks
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Yield Segment objects with HLS-calculated gradient colors."""
+        for line in self.lines:
+            line_length = len(line)
+
+            for char_index, char in enumerate(line):
+                # Calculate horizontal position (0.0 to 1.0)
+                position = char_index / line_length if line_length > 0 else 0
+
+                # Interpolate hue and lightness using HLS color space
+                hue = self.hue_start + (self.hue_end - self.hue_start) * position
+                lightness = self.light_start + (self.light_end - self.light_start) * position
+
+                # Convert HLS to RGB
+                r, g, b = colorsys.hls_to_rgb(hue, lightness, self.saturation)
+                color = Color.from_rgb(r * 255, g * 255, b * 255)
+
+                yield Segment(char, Style(color=color))
+
+            yield Segment.line()
+
+
+# V1: Matte red → matte green (desaturated, restrained gradient)
+# Professional aesthetic: muted tones similar to Rich's own logo design
+DEEP_AI_ASCII_V1 = GradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗       █████╗        ██╗",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗     ██╔══██╗       ██║",
+        " ██║  ██║ █████╗   █████╗   ██████╔╝     ███████║       ██║",
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝      ██╔══██║       ██║",
+        " ██████╔╝ ███████╗ ███████╗ ██║          ██║  ██║       ██║",
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝          ╚═╝  ╚═╝       ╚═╝",
+    ],
+    color_stops=[
+        # DEEP region: 0.0-0.65 (matte red dominant) - desaturated, earthy reds
+        (0.00, (120, 70, 65)),     # Dark matte red (stone-like)
+        (0.20, (140, 80, 70)),     # Medium matte red
+        (0.40, (135, 85, 75)),     # Lighter matte red (subtle variation)
+        (0.60, (110, 95, 85)),     # Red-gray transition (neutral, muted)
+
+        # Transition zone: 0.65-0.75 (short, subtle shift)
+        (0.70, (85, 100, 90)),     # Gray-green (desaturated neutral)
+
+        # AI region: 0.75-1.0 (matte green) - desaturated emerald similar to default
+        (0.80, (50, 120, 100)),    # Matte emerald (desaturated #10b981)
+        (0.90, (40, 130, 105)),    # Slightly brighter matte green
+        (1.00, (45, 125, 100)),    # Matte emerald (consistent with Deep Agents default)
+    ]
+)
+
+# V2: Stone red monochrome (single matte red palette, profile pic aesthetic)
+# Minimal, restrained: subtle variations within desaturated red spectrum only
+DEEP_AI_ASCII_V2 = GradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗       █████╗        ██╗",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗     ██╔══██╗       ██║",
+        " ██║  ██║ █████╗   █████╗   ██████╔╝     ███████║       ██║",
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝      ██╔══██║       ██║",
+        " ██████╔╝ ███████╗ ███████╗ ██║          ██║  ██║       ██║",
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝          ╚═╝  ╚═╝       ╚═╝",
+    ],
+    color_stops=[
+        # Monochrome stone red: very subtle variations for depth, no other colors
+        (0.0, (115, 65, 60)),      # Dark stone red (shadows)
+        (0.3, (130, 75, 68)),      # Medium stone red
+        (0.6, (125, 72, 65)),      # Slightly lighter stone red (subtle highlight)
+        (1.0, (120, 70, 63)),      # Return to darker stone red (consistent depth)
+    ]
+)
+
+# V3: HORIZONTAL gradient with vibrant neon green → blood red
+# Using Rich's blend_rgb() with horizontal flow (left to right per line)
+DEEP_AI_ASCII_V3 = GradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗       █████╗        ██╗",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗     ██╔══██╗       ██║",
+        " ██║  ██║ █████╗   █████╗   ██████╔╝     ███████║       ██║",
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝      ██╔══██║       ██║",
+        " ██████╔╝ ███████╗ ███████╗ ██║          ██║  ██║       ██║",
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝          ╚═╝  ╚═╝       ╚═╝",
+    ],
+    color_stops=[
+        (0.0, (57, 255, 20)),      # Bright neon green (AI/electric green)
+        (0.2, (30, 255, 60)),      # Vibrant electric green
+        (0.4, (0, 255, 100)),      # Pure electric green
+        (0.6, (255, 100, 0)),      # Orange transition (fire)
+        (0.8, (220, 20, 20)),      # Bright blood red
+        (1.0, (139, 0, 0)),        # Dark blood red (Warhammer aesthetic)
+    ]
+)
+
+# V4: Progressive Enhancement - Basic HLS gradient with DIMMED_MONOKAI palette
+# Follows Rich's ColorBox technique using HLS color space for smooth perceptual transitions
+# Analogous colors (red→gold→green hue progression) for professional aesthetic
+DEEP_AI_ASCII_V4 = HLSGradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗            █████╗          ",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗    ━     ██╔══██╗     ██  ",  # Dot for lowercase i
+        " ██║  ██║ █████╗   █████╗   ██████╔╝    ━     ███████║         ",  # Gap between dot and stem
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝     ━     ██╔══██║     ██  ",  # Stem starts
+        " ██████╔╝ ███████╗ ███████╗ ██║         ━     ██║  ██║     ██  ",  # Stem continues
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝               ╚═╝  ╚═╝     ██  ",  # Stem base
+    ],
+    hue_range=(0.0, 0.33),          # Red (0.0) → Green (0.33) - analogous color progression
+    lightness_range=(0.35, 0.55),   # Moderate lightness for DIMMED_MONOKAI aesthetic
+    saturation=0.5                   # Desaturated for professional TUI appearance
+)
+
+# V5: Style Layering - Vibrant MONOKAI with high saturation HLS gradient
+# Advanced: Full color wheel traversal for maximum visual impact
+# High saturation + varied lightness for electric, vibrant aesthetic
+DEEP_AI_ASCII_V5 = HLSGradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗            █████╗          ",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗    ━     ██╔══██╗     ██  ",  # Dot for lowercase i
+        " ██║  ██║ █████╗   █████╗   ██████╔╝    ━     ███████║         ",  # Gap between dot and stem
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝     ━     ██╔══██║     ██  ",  # Stem starts
+        " ██████╔╝ ███████╗ ███████╗ ██║         ━     ██║  ██║     ██  ",  # Stem continues
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝               ╚═╝  ╚═╝     ██  ",  # Stem base
+    ],
+    hue_range=(0.9, 0.4),           # Magenta-red (0.9) → Yellow-green (0.4) - vibrant spectrum
+    lightness_range=(0.50, 0.65),   # Bright lightness for high-energy MONOKAI aesthetic
+    saturation=1.0                   # Full saturation for maximum vibrancy
+)
+
+# V6: Advanced - Matte burgundy/dried blood gradient with HLS smoothness
+# Dark red-burgundy tones with subtle transition for gritty, industrial aesthetic
+# User feedback: "smooth transition" achieved via HLS color space
+DEEP_AI_ASCII_V6 = HLSGradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗            █████╗          ",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗    ━     ██╔══██╗     ██  ",  # Dot for lowercase i
+        " ██║  ██║ █████╗   █████╗   ██████╔╝    ━     ███████║         ",  # Gap between dot and stem
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝     ━     ██╔══██║     ██  ",  # Stem starts
+        " ██████╔╝ ███████╗ ███████╗ ██║         ━     ██║  ██║     ██  ",  # Stem continues
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝               ╚═╝  ╚═╝     ██  ",  # Stem base
+    ],
+    hue_range=(0.98, 0.02),         # Burgundy-red (0.98) → Deep red (0.02) - dried blood spectrum
+    lightness_range=(0.28, 0.35),   # Dark for matte, dried blood aesthetic
+    saturation=0.65                  # Moderate saturation for matte burgundy (not glossy)
+)
+
+# V7: Final - V2's dried blood color + V6's smooth HLS transitions
+# Stone red monochrome palette with subtle variations for depth
+# Single dash, properly aligned lowercase "i" matching baseline
+DEEP_AI_ASCII_V7 = GradientBanner(
+    lines=[
+        " ██████╗  ███████╗ ███████╗ ██████╗       ─      █████╗       ██  ",
+        " ██╔══██╗ ██╔════╝ ██╔════╝ ██╔══██╗      ─     ██╔══██╗          ",
+        " ██║  ██║ █████╗   █████╗   ██████╔╝      ─     ███████║      ██  ",
+        " ██║  ██║ ██╔══╝   ██╔══╝   ██╔═══╝       ─     ██╔══██║      ██  ",
+        " ██████╔╝ ███████╗ ███████╗ ██║           ─     ██║  ██║      ██  ",
+        " ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝                 ╚═╝  ╚═╝      ██  ",
+    ],
+    color_stops=[
+        # V2's stone red palette - the dried blood color you liked
+        # Monochrome with subtle variations for depth (not gradient across spectrum)
+        (0.0, (115, 65, 60)),      # Dark stone red (shadows)
+        (0.3, (130, 75, 68)),      # Medium stone red
+        (0.6, (125, 72, 65)),      # Slightly lighter stone red (subtle highlight)
+        (1.0, (120, 70, 63)),      # Return to darker stone red (consistent depth)
+    ]
+)
 
 BANNER_VARIANTS: dict[str, str] = {
     "v1": DEEP_AI_ASCII_V1,

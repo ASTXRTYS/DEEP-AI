@@ -22,6 +22,7 @@ from langchain.agents.middleware import HostExecutionPolicy
 from langchain_anthropic import ChatAnthropic
 
 from deepagents_cli.agent_memory import AgentMemoryMiddleware
+from deepagents_cli.config import settings
 from deepagents_cli.middleware_stack import build_handoff_middleware_stack
 from deepagents_cli.resumable_shell_async import AsyncResumableShellToolMiddleware
 from deepagents_cli.tools import http_request, tavily_client, web_search
@@ -81,7 +82,7 @@ long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
 backend = CompositeBackend(default=FilesystemBackend(), routes={"/memories/": long_term_backend})
 
 agent_middleware = [
-    AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"),
+    AgentMemoryMiddleware(settings=settings, assistant_id="agent"),
     shell_middleware,
 ]
 agent_middleware.extend(build_handoff_middleware_stack(model))

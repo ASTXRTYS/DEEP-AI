@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
-from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
+from deepagents_cli._internal import ResumableShellToolMiddleware
 from langchain.agents.middleware.shell_tool import (
     _PersistentShellTool,
     _SessionResources,

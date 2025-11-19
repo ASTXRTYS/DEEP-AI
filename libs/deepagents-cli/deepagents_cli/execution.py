@@ -2,17 +2,15 @@
 
 import asyncio
 import json
-import logging
 import sys
 import termios
 import tty
-from datetime import UTC, datetime
-from typing import Any, TYPE_CHECKING
 
 from langchain.agents.middleware.human_in_the_loop import (
     ActionRequest,
     ApproveDecision,
     Decision,
+    HITLRequest,
     HITLResponse,
     RejectDecision,
 )
@@ -22,13 +20,10 @@ from pydantic import TypeAdapter, ValidationError
 from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
-from typing_extensions import NotRequired, TypedDict
 
-from deepagents.middleware.handoff_summarization import HANDOFF_ACTION_NAME
 from deepagents_cli.config import COLORS, console
 from deepagents_cli.file_ops import FileOpTracker, build_approval_preview
 from deepagents_cli.input import parse_file_mentions
-from deepagents_cli.thread_store import ThreadStoreError
 from deepagents_cli.ui import (
     TokenTracker,
     format_tool_display,
@@ -38,116 +33,7 @@ from deepagents_cli.ui import (
     render_todo_list,
 )
 
-class _FlexibleActionRequest(TypedDict):
-    name: str
-    args: dict[str, Any]
-    description: NotRequired[str]
-
-
-class _FlexibleReviewConfig(TypedDict):
-    action_name: str
-    allowed_decisions: list[str]
-    args_schema: NotRequired[dict[str, Any]]
-
-
-class _FlexibleHITLRequest(TypedDict):
-    action_requests: list[_FlexibleActionRequest]
-    review_configs: list[_FlexibleReviewConfig]
-    metadata: NotRequired[dict[str, Any]]
-
-
-if TYPE_CHECKING:  # pragma: no cover - typing aid only
-    from deepagents.middleware.handoff_summarization import HandoffActionArgs
-
-
-_HITL_REQUEST_ADAPTER = TypeAdapter(_FlexibleHITLRequest)
-
-
-def _normalize_hitl_request_payload(payload: Any) -> dict[str, Any]:
-    """Return a plain dict for any validated HITL payload."""
-    if payload is None:
-        return {}
-    if hasattr(payload, "model_dump"):
-        try:
-            normalized = payload.model_dump()
-        except Exception:  # pragma: no cover - defensive guard
-            normalized = None
-    else:
-        normalized = payload
-
-    if isinstance(normalized, dict):
-        return dict(normalized)
-
-    try:
-        return dict(normalized)
-    except Exception:  # pragma: no cover - final fallback
-        return {}
-logger = logging.getLogger(__name__)
-
-
-def _coerce_action_args(raw_args: Any) -> dict[str, Any]:
-    """Convert ActionRequest args into a mutable dict."""
-    if raw_args is None:
-        return {}
-    if isinstance(raw_args, dict):
-        return dict(raw_args)
-    if hasattr(raw_args, "model_dump"):
-        try:
-            dumped = raw_args.model_dump()
-        except Exception:  # pragma: no cover - defensive guard
-            return {}
-        if isinstance(dumped, dict):
-            return dict(dumped)
-    return {}
-
-
-def _resolve_handoff_action(
-    hitl_request: dict[str, Any] | None,
-) -> tuple["HandoffActionArgs", dict[str, Any] | None]:
-    """Return canonical :class:`HandoffActionArgs` plus the raw request entry."""
-    if not isinstance(hitl_request, dict):
-        return {}, None
-
-    action_requests = hitl_request.get("action_requests") or []
-    for request in action_requests:
-        if not isinstance(request, dict):
-            continue
-        if request.get("name") != HANDOFF_ACTION_NAME:
-            continue
-        return _coerce_action_args(request.get("args")), request
-
-    # Backwards compatibility: fall back to legacy top-level shape
-    fallback: dict[str, Any] = {}
-    for key in (
-        "handoff_id",
-        "summary_md",
-        "summary_json",
-        "parent_thread_id",
-        "assistant_id",
-        "preview_only",
-    ):
-        value = hitl_request.get(key)
-        if value is not None:
-            fallback[key] = value
-    return fallback, None
-
-
-def is_handoff_request(hitl_request: Any) -> bool:
-    if not isinstance(hitl_request, dict):
-        return False
-    if hitl_request.get("action") == HANDOFF_ACTION_NAME:
-        return True
-    action_requests = hitl_request.get("action_requests") or []
-    if any(
-        isinstance(req, dict) and req.get("name") == HANDOFF_ACTION_NAME
-        for req in action_requests
-    ):
-        return True
-    review_configs = hitl_request.get("review_configs") or []
-    return any(
-        isinstance(cfg, dict) and cfg.get("action_name") == HANDOFF_ACTION_NAME
-        for cfg in review_configs
-    )
+_HITL_REQUEST_ADAPTER = TypeAdapter(HITLRequest)
 
 
 def prompt_for_tool_approval(
@@ -278,7 +164,6 @@ async def execute_task(
     session_state,
     token_tracker: TokenTracker | None = None,
     backend=None,
-    run_metadata: dict[str, Any] | None = None,
 ):
     """Execute any task by passing it directly to the AI agent."""
     # Parse file mentions and inject content if any
@@ -302,57 +187,10 @@ async def execute_task(
     else:
         final_input = prompt_text
 
-    thread_id = assistant_id or "main"
-    if session_state and session_state.thread_manager:
-        thread_id = session_state.thread_manager.get_current_thread_id()
-
-    config_configurable: dict[str, Any] = {"thread_id": thread_id}
-    if assistant_id:
-        config_configurable["assistant_id"] = assistant_id
-
-    handoff_trace_metadata: dict[str, Any] | None = None
-    metadata_overrides = dict(run_metadata or {})
-    auto_approve = bool(getattr(session_state, "auto_approve", False))
-
-    def base_run_metadata() -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        if session_state and session_state.thread_manager:
-            try:
-                thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
-            except (ThreadStoreError, OSError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "Failed to retrieve thread metadata for tracing context",
-                    exc_info=True,
-                    extra={"thread_id": thread_id, "error_type": type(exc).__name__},
-                )
-                thread_meta = None
-
-            if thread_meta:
-                thread_meta_block = dict(thread_meta.get("metadata") or {})
-                if thread_meta_block:
-                    metadata["thread_metadata"] = thread_meta_block
-                    handoff_block = thread_meta_block.get("handoff")
-                    if handoff_block:
-                        metadata["handoff"] = handoff_block
-                if name := thread_meta.get("name"):
-                    metadata["thread_name"] = name
-        return metadata
-
-    def build_run_config(*, with_trace_metadata: bool = True) -> dict[str, Any]:
-        metadata = base_run_metadata()
-        if metadata_overrides:
-            metadata.update(metadata_overrides)
-        if with_trace_metadata and handoff_trace_metadata:
-            metadata.update(handoff_trace_metadata)
-        return {
-            "configurable": config_configurable,
-            "metadata": metadata,
-        }
-
-    def serialize_decision(decision: Decision | dict[str, Any]) -> dict[str, Any]:
-        if isinstance(decision, dict):
-            return decision
-        return decision.model_dump()
+    config = {
+        "configurable": {"thread_id": session_state.thread_id},
+        "metadata": {"assistant_id": assistant_id} if assistant_id else {},
+    }
 
     has_responded = False
     captured_input_tokens = 0
@@ -411,13 +249,13 @@ async def execute_task(
             hitl_response: dict[str, HITLResponse] = {}
             suppress_resumed_output = False
             # Track all pending interrupts: {interrupt_id: request_data}
-            pending_interrupts: dict[str, dict[str, Any]] = {}
+            pending_interrupts: dict[str, HITLRequest] = {}
 
             async for chunk in agent.astream(
                 stream_input,
                 stream_mode=["messages", "updates"],  # Dual-mode for HITL support
                 subgraphs=True,
-                config=build_run_config(),
+                config=config,
                 durability="exit",
             ):
                 # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
@@ -442,9 +280,7 @@ async def execute_task(
                                     validated_request = _HITL_REQUEST_ADAPTER.validate_python(
                                         interrupt_obj.value
                                     )
-                                    pending_interrupts[interrupt_obj.id] = (
-                                        _normalize_hitl_request_payload(validated_request)
-                                    )
+                                    pending_interrupts[interrupt_obj.id] = validated_request
                                     interrupt_occurred = True
                                 except ValidationError as e:
                                     console.print(
@@ -672,194 +508,12 @@ async def execute_task(
                 any_rejected = False
 
                 for interrupt_id, hitl_request in pending_interrupts.items():
-                    if is_handoff_request(hitl_request):
-                        from deepagents_cli.handoff_ui import HandoffProposal, prompt_handoff_decision
-
-                        payload_metadata = hitl_request.get("metadata")
-                        if isinstance(payload_metadata, dict):
-                            handoff_trace_metadata = payload_metadata.copy()
-
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
-
-                        handoff_args, handoff_request = _resolve_handoff_action(hitl_request)
-                        summary_json = handoff_args.get("summary_json") or hitl_request.get(
-                            "summary_json", {}
-                        )
-                        if not isinstance(summary_json, dict):
-                            summary_json = {}
-                        else:
-                            summary_json = dict(summary_json)
-                        summary_md = (
-                            handoff_args.get("summary_md")
-                            or hitl_request.get("summary")
-                            or hitl_request.get("summary_md")
-                            or ""
-                        )
-                        summary_md = str(summary_md or "")
-                        parent_thread_id = (
-                            handoff_args.get("parent_thread_id")
-                            or hitl_request.get("parent_thread_id")
-                            or thread_id
-                            or ""
-                        )
-                        parent_thread_id = str(parent_thread_id)
-                        assistant_for_request = (
-                            handoff_args.get("assistant_id")
-                            or hitl_request.get("assistant_id")
-                            or assistant_id
-                            or ""
-                        )
-                        assistant_for_request = str(assistant_for_request)
-                        preview_requested = bool(
-                            handoff_args.get("preview_only")
-                            or hitl_request.get("preview_only")
-                            or (payload_metadata or {}).get("handoff", {}).get("preview_only")
-                        )
-                        handoff_id = (
-                            handoff_args.get("handoff_id")
-                            or hitl_request.get("handoff_id")
-                            or ""
-                        )
-                        handoff_id = str(handoff_id)
-
-                        if not summary_md and summary_json:
-                            from deepagents.middleware.handoff_summarization import (
-                                render_summary_markdown,
-                            )
-
-                            summary_md = render_summary_markdown(
-                                summary_json.get("title", "Handoff Summary"),
-                                summary_json.get("tldr", ""),
-                                summary_json.get("body", []),
-                            )
-
-                        proposal = HandoffProposal(
-                            handoff_id=handoff_id,
-                            summary_json=summary_json,
-                            summary_md=summary_md,
-                            parent_thread_id=parent_thread_id,
-                            assistant_id=str(assistant_for_request),
-                        )
-
-                        # Jason owns CLI handoff UX polish, including preview-mode follow-ups (issues #92/#93).
-                        decision_result = await prompt_handoff_decision(
-                            proposal,
-                            preview_only=preview_requested,
-                        )
-
-                        decision_kind = (
-                            getattr(decision_result, "status", None)
-                            or getattr(decision_result, "type", None)
-                            or ""
-                        ).lower()
-                        decision_payload: dict[str, Any] | None = None
-
-                        if decision_kind in {"accepted", "accept", "approve", "approved"}:
-                            decision_payload = {"type": "approve"}
-
-                            try:
-                                from deepagents.middleware.handoff_summarization import (
-                                    HandoffSummary,
-                                )
-
-                                from deepagents_cli.handoff_persistence import (
-                                    apply_handoff_acceptance,
-                                )
-
-                                parent_thread_id = parent_thread_id or hitl_request.get(
-                                    "parent_thread_id", ""
-                                )
-                                hsum = HandoffSummary(
-                                    handoff_id=proposal.handoff_id,
-                                    summary_json=decision_result.summary_json
-                                    or summary_json,
-                                    summary_md=decision_result.summary_md or summary_md,
-                                )
-
-                                child_id = apply_handoff_acceptance(
-                                    session_state=session_state,
-                                    summary=hsum,
-                                    summary_md=hsum.summary_md,
-                                    summary_json=hsum.summary_json,
-                                    parent_thread_id=parent_thread_id,
-                                )
-
-                                if session_state:
-                                    session_state.pending_handoff_child_id = child_id
-                                console.print()
-                                console.print("[green]✓ Handoff approved. Processing...[/green]")
-                                console.print()
-                            except (ValueError, OSError, json.JSONDecodeError) as exc:
-                                logger.warning(
-                                    "Failed to persist handoff acceptance",
-                                    extra={
-                                        "error": str(exc),
-                                        "error_type": type(exc).__name__,
-                                        "parent_thread_id": parent_thread_id,
-                                        "handoff_id": proposal.handoff_id,
-                                    },
-                                )
-                        elif decision_kind in {"refine", "edit", "feedback"}:
-                            action_name = (
-                                (handoff_request or {}).get("name")
-                                or hitl_request.get("action")
-                                or HANDOFF_ACTION_NAME
-                            )
-                            edited_args: dict[str, Any] = dict(handoff_args)
-                            edited_args.update(
-                                {
-                                    "handoff_id": proposal.handoff_id,
-                                    "parent_thread_id": parent_thread_id,
-                                    "summary_json": decision_result.summary_json or summary_json,
-                                    "summary_md": decision_result.summary_md or summary_md,
-                                }
-                            )
-                            if assistant_for_request and not edited_args.get("assistant_id"):
-                                edited_args["assistant_id"] = assistant_for_request
-                            feedback = getattr(decision_result, "feedback", None)
-                            if feedback:
-                                edited_args["feedback"] = feedback
-
-                            decision_payload = {
-                                "type": "edit",
-                                "edited_action": {
-                                    "name": action_name,
-                                    "args": edited_args,
-                                },
-                            }
-                            console.print()
-                            console.print("[yellow]Regenerating summary with your feedback...[/yellow]")
-                            console.print()
-                        elif decision_kind == "preview":
-                            console.print()
-                            console.print(
-                                "[dim]Preview-only review acknowledged. No decision sent; re-run the handoff when ready.[/dim]"
-                            )
-                            console.print()
-                            decision_payload = {"type": "preview"}
-                        else:
-                            decision_payload = {
-                                "type": "reject",
-                                "message": "User declined handoff",
-                            }
-
-                        if decision_payload and decision_payload.get("type") == "reject":
-                            any_rejected = True
-
-                        if decision_payload:
-                            hitl_response[interrupt_id] = {"decisions": [decision_payload]}
-
-                        continue
-
-                    action_requests = (
-                        hitl_request.get("action_requests", []) if hitl_request else []
-                    )
-                    decisions: list[Decision | dict[str, Any]] = []
-
-                    if auto_approve:
-                        for action_request in action_requests:
+                    # Check if auto-approve is enabled
+                    if session_state.auto_approve:
+                        # Auto-approve all commands without prompting
+                        decisions = []
+                        for action_request in hitl_request["action_requests"]:
+                            # Show what's being auto-approved (brief, dim message)
                             if spinner_active:
                                 status.stop()
                                 spinner_active = False
@@ -867,28 +521,44 @@ async def execute_task(
                             description = action_request.get("description", "tool action")
                             console.print()
                             console.print(f"  [dim]⚡ {description}[/dim]")
-                            decisions.append(ApproveDecision(type="approve"))
 
+                            decisions.append({"type": "approve"})
+
+                        hitl_response[interrupt_id] = {"decisions": decisions}
+
+                        # Restart spinner for continuation
                         if not spinner_active:
                             status.start()
                             spinner_active = True
                     else:
+                        # Normal HITL flow - stop spinner and prompt user
                         if spinner_active:
                             status.stop()
                             spinner_active = False
 
-                        for action_request in action_requests:
+                        # Handle human-in-the-loop approval
+                        decisions = []
+                        for action_index, action_request in enumerate(
+                            hitl_request["action_requests"]
+                        ):
                             decision = prompt_for_tool_approval(
                                 action_request,
                                 assistant_id,
                             )
                             decisions.append(decision)
 
-                    serialized_decisions = [serialize_decision(d) for d in decisions]
-                    if any(decision.get("type") == "reject" for decision in serialized_decisions):
-                        any_rejected = True
+                            # Mark file operations as HIL-approved if user approved
+                            if decision.get("type") == "approve":
+                                tool_name = action_request.get("name")
+                                if tool_name in {"write_file", "edit_file"}:
+                                    file_op_tracker.mark_hitl_approved(
+                                        tool_name, action_request.get("args", {})
+                                    )
 
-                    hitl_response[interrupt_id] = {"decisions": serialized_decisions}
+                        if any(decision.get("type") == "reject" for decision in decisions):
+                            any_rejected = True
+
+                        hitl_response[interrupt_id] = {"decisions": decisions}
 
                 suppress_resumed_output = any_rejected
 
@@ -908,7 +578,6 @@ async def execute_task(
                 # Continue the while loop to restream
             else:
                 # No interrupt, break out of while loop
-                handoff_trace_metadata = None
                 break
 
     except asyncio.CancelledError:
@@ -920,7 +589,7 @@ async def execute_task(
 
         try:
             await agent.aupdate_state(
-                config=build_run_config(with_trace_metadata=False),
+                config=config,
                 values={
                     "messages": [
                         HumanMessage(content="[The previous request was cancelled by the system]")
@@ -943,7 +612,7 @@ async def execute_task(
         # Inform the agent synchronously (in async context)
         try:
             await agent.aupdate_state(
-                config=build_run_config(with_trace_metadata=False),
+                config=config,
                 values={
                     "messages": [
                         HumanMessage(content="[User interrupted the previous request with Ctrl+C]")
@@ -964,85 +633,3 @@ async def execute_task(
         # Track token usage (display only via /tokens command)
         if token_tracker and (captured_input_tokens or captured_output_tokens):
             token_tracker.add(captured_input_tokens, captured_output_tokens)
-
-            if session_state and session_state.thread_manager and thread_id:
-                try:
-                    session_state.thread_manager.update_token_count(
-                        thread_id, token_tracker.current_context
-                    )
-                except (ValueError, OSError, json.JSONDecodeError) as exc:
-                    logger.debug(
-                        "Failed to update token count",
-                        extra={
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                            "thread_id": thread_id,
-                        },
-                    )
-                    # Non-critical - token tracking is for display only via /tokens command
-
-    if session_state and session_state.thread_manager and thread_id:
-        try:
-            final_state = await agent.aget_state(build_run_config(with_trace_metadata=False))
-        except Exception as exc:
-            logger.warning(
-                "Failed to load final agent state",
-                extra={
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "thread_id": thread_id,
-                },
-            )
-            final_state = None
-        else:
-            if final_state and final_state.values.get("_handoff_cleanup_pending"):
-                from deepagents_cli.handoff_persistence import clear_summary_block_file
-
-                try:
-                    agent_md_path = session_state.thread_manager.agent_dir / "agent.md"
-                    clear_summary_block_file(agent_md_path)
-
-                    thread_meta = session_state.thread_manager.get_thread_metadata(thread_id)
-                    if thread_meta:
-                        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-                        existing = dict(
-                            (thread_meta.get("metadata") or {}).get("handoff") or {}
-                        )
-                        updated = existing | {
-                            "pending": False,
-                            "cleanup_required": False,
-                            "last_cleanup_at": timestamp,
-                        }
-                        # Jason is the contact for broader lifecycle follow-ups (issue #91).
-                        session_state.thread_manager.update_thread_metadata(
-                            thread_id,
-                            {"handoff": updated},
-                        )
-                    else:
-                        logger.debug(
-                            "Skipping handoff metadata cleanup; metadata unavailable",
-                            extra={"thread_id": thread_id},
-                        )
-                except (ValueError, OSError, json.JSONDecodeError) as exc:
-                    logger.warning(
-                        "Failed to clean up handoff state",
-                        extra={
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                            "thread_id": thread_id,
-                            "operation": "clear_summary_block_file",
-                        },
-                    )
-
-        try:
-            session_state.thread_manager.touch_thread(thread_id, reason="interaction")
-        except (ValueError, OSError, json.JSONDecodeError) as exc:
-            logger.debug(
-                "Failed to touch thread timestamp",
-                extra={
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "thread_id": thread_id,
-                    "reason": "interaction",
-                },
-            )

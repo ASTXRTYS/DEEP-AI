@@ -12,7 +12,7 @@ TEST_FILE ?= tests/unit_tests
 INTEGRATION_FILES ?= tests/integration_tests
 
 test:
-	uv run pytest --disable-socket --allow-unix-socket $(TEST_FILE)
+	uv run --group test pytest --disable-socket --allow-unix-socket $(TEST_FILE)
 
 test_integration:
 	uv run pytest $(INTEGRATION_FILES)

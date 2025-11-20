@@ -187,8 +187,15 @@ async def execute_task(
     else:
         final_input = prompt_text
 
+    # Use ThreadManager's persistent thread ID if available
+    thread_id = (
+        session_state.thread_manager.get_current_thread_id()
+        if session_state and session_state.thread_manager
+        else "main"  # Fallback for compatibility
+    )
+
     config = {
-        "configurable": {"thread_id": session_state.thread_id},
+        "configurable": {"thread_id": thread_id},
         "metadata": {"assistant_id": assistant_id} if assistant_id else {},
     }
 

@@ -300,7 +300,7 @@ class SessionState:
         self.menu_requested: bool = False  # Reserved for manual menu triggers
         self.exit_hint_until: float | None = None
         self.exit_hint_handle = None
-        self.thread_id = str(uuid.uuid4())
+        # Note: thread_id removed - now managed by ThreadManager for persistence
 
     def toggle_auto_approve(self) -> bool:
         """Toggle auto-approve and return new state."""

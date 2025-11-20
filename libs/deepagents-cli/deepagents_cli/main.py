@@ -270,6 +270,14 @@ async def _run_agent_session(
         sandbox_type: Type of sandbox being used
         setup_script_path: Path to setup script that was run (if any)
     """
+    # Initialize ThreadManager and attach to session_state
+    from .thread_manager import ThreadManager
+
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    thread_manager = ThreadManager(agent_dir=agent_dir, assistant_id=assistant_id)
+    session_state.thread_manager = thread_manager
+    session_state.model = model
+
     # Create agent with conditional tools
     tools = [http_request, fetch_url]
     if settings.has_tavily:

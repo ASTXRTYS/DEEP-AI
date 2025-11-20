@@ -514,66 +514,213 @@ async def execute_task(
             if interrupt_occurred:
                 any_rejected = False
 
+                # Check if any interrupt is a handoff request (special handling)
+                handoff_interrupt = None
                 for interrupt_id, hitl_request in pending_interrupts.items():
-                    # Check if auto-approve is enabled
-                    if session_state.auto_approve:
-                        # Auto-approve all commands without prompting
-                        decisions = []
-                        for action_request in hitl_request["action_requests"]:
-                            # Show what's being auto-approved (brief, dim message)
+                    action_requests = hitl_request.get("action_requests", [])
+                    if action_requests and action_requests[0].get("name") == "approve_handoff":
+                        handoff_interrupt = (interrupt_id, hitl_request, action_requests[0])
+                        break
+
+                if handoff_interrupt:
+                    # Route handoff through dedicated UI and persistence flow
+                    interrupt_id, hitl_request, action_request = handoff_interrupt
+                    action_args = action_request.get("args", {})
+
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+
+                    from deepagents_cli.handoff_persistence import apply_handoff_acceptance
+                    from deepagents_cli.handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
+                    from deepagents.middleware.handoff_summarization import HandoffSummary
+
+                    # Build proposal from interrupt payload
+                    base_handoff_id = action_args.get("handoff_id", "unknown")
+                    base_summary_json = dict(action_args.get("summary_json", {}))
+                    base_summary_json.setdefault("handoff_id", base_handoff_id)
+                    base_summary_md = action_args.get("summary_md", "")
+                    proposal = HandoffProposal(
+                        handoff_id=base_handoff_id,
+                        summary_json=base_summary_json,
+                        summary_md=base_summary_md,
+                        parent_thread_id=action_args.get("parent_thread_id", ""),
+                        assistant_id=action_args.get("assistant_id", "agent"),
+                    )
+
+                    # Get user decision through handoff-specific UI
+                    try:
+                        decision = await prompt_handoff_decision(
+                            proposal, preview_only=action_args.get("preview_only", False)
+                        )
+                    except Exception as exc:
+                        logger.error(f"Handoff UI failed: {exc}", exc_info=True)
+                        console.print(f"[red]Error displaying handoff UI: {exc}[/red]")
+                        hitl_response[interrupt_id] = {"decisions": [{"type": "reject"}]}
+                        any_rejected = True
+                    else:
+                        decision_summary_json = dict(decision.summary_json or base_summary_json)
+                        decision_summary_json.setdefault("handoff_id", base_handoff_id)
+                        decision_summary_md = decision.summary_md or base_summary_md
+
+                        if decision.status == "accepted":
+                            # Persist and create child thread
+                            summary = HandoffSummary(
+                                handoff_id=base_handoff_id,
+                                summary_json=decision_summary_json,
+                                summary_md=decision_summary_md,
+                            )
+
+                            try:
+                                child_id = apply_handoff_acceptance(
+                                    session_state=session_state,
+                                    summary=summary,
+                                    summary_md=decision_summary_md,
+                                    summary_json=decision_summary_json,
+                                    parent_thread_id=action_args.get("parent_thread_id", ""),
+                                    agent=agent,
+                                )
+
+                                # Switch to child thread
+                                session_state.thread_manager.switch_thread(child_id)
+                                console.print()
+                                console.print(
+                                    f"[green]✓ Handoff accepted. Switched to thread: {child_id[:8]}[/green]"
+                                )
+                                console.print()
+
+                                # Build HITL response for graph resumption
+                                hitl_response[interrupt_id] = {
+                                    "decisions": [
+                                        {
+                                            "type": "approve",
+                                            "summary_json": summary.summary_json,
+                                            "summary_md": summary.summary_md,
+                                        }
+                                    ]
+                                }
+
+                            except Exception as exc:
+                                logger.error(
+                                    f"Handoff acceptance failed: {exc}", exc_info=True
+                                )
+                                console.print(
+                                    f"[red]Failed to complete handoff: {exc}[/red]"
+                                )
+                                console.print()
+                                hitl_response[interrupt_id] = {
+                                    "decisions": [{"type": "reject"}]
+                                }
+                                any_rejected = True
+
+                        elif decision.status == "refine":
+                            feedback_text = (decision.feedback or "").strip()
+                            if feedback_text:
+                                edited_action = {
+                                    "name": action_request.get("name") or "approve_handoff",
+                                    "args": {
+                                        "summary_json": decision_summary_json,
+                                        "summary_md": decision_summary_md,
+                                        "feedback": feedback_text,
+                                    },
+                                }
+                                hitl_response[interrupt_id] = {
+                                    "decisions": [
+                                        {
+                                            "type": "edit",
+                                            "edited_action": edited_action,
+                                            "feedback": feedback_text,
+                                        }
+                                    ]
+                                }
+                            else:
+                                hitl_response[interrupt_id] = {"decisions": [{"type": "reject"}]}
+                                any_rejected = True
+
+                        elif decision.status == "preview":
+                            # Preview-only mode, no action taken
+                            hitl_response[interrupt_id] = {"decisions": [{"type": "preview"}]}
+                            any_rejected = True
+
+                        else:
+                            # Declined
+                            hitl_response[interrupt_id] = {"decisions": [{"type": "reject"}]}
+                            any_rejected = True
+
+                    suppress_resumed_output = any_rejected
+
+                else:
+                    # Normal HITL flow for non-handoff interrupts
+                    for interrupt_id, hitl_request in pending_interrupts.items():
+                        # Check if auto-approve is enabled
+                        if session_state.auto_approve:
+                            # Auto-approve all commands without prompting
+                            decisions = []
+                            for action_request in hitl_request["action_requests"]:
+                                # Show what's being auto-approved (brief, dim message)
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+
+                                description = action_request.get("description", "tool action")
+                                console.print()
+                                console.print(f"  [dim]⚡ {description}[/dim]")
+
+                                decisions.append({"type": "approve"})
+
+                            hitl_response[interrupt_id] = {"decisions": decisions}
+
+                            # Restart spinner for continuation
+                            if not spinner_active:
+                                status.start()
+                                spinner_active = True
+                        else:
+                            # Normal HITL flow - stop spinner and prompt user
                             if spinner_active:
                                 status.stop()
                                 spinner_active = False
 
-                            description = action_request.get("description", "tool action")
-                            console.print()
-                            console.print(f"  [dim]⚡ {description}[/dim]")
+                            # Handle human-in-the-loop approval
+                            decisions = []
+                            for action_index, action_request in enumerate(
+                                hitl_request["action_requests"]
+                            ):
+                                decision = prompt_for_tool_approval(
+                                    action_request,
+                                    assistant_id,
+                                )
+                                decisions.append(decision)
 
-                            decisions.append({"type": "approve"})
+                                # Mark file operations as HIL-approved if user approved
+                                if decision.get("type") == "approve":
+                                    tool_name = action_request.get("name")
+                                    if tool_name in {"write_file", "edit_file"}:
+                                        file_op_tracker.mark_hitl_approved(
+                                            tool_name, action_request.get("args", {})
+                                        )
 
-                        hitl_response[interrupt_id] = {"decisions": decisions}
+                            if any(decision.get("type") == "reject" for decision in decisions):
+                                any_rejected = True
 
-                        # Restart spinner for continuation
-                        if not spinner_active:
-                            status.start()
-                            spinner_active = True
-                    else:
-                        # Normal HITL flow - stop spinner and prompt user
-                        if spinner_active:
-                            status.stop()
-                            spinner_active = False
+                            hitl_response[interrupt_id] = {"decisions": decisions}
 
-                        # Handle human-in-the-loop approval
-                        decisions = []
-                        for action_index, action_request in enumerate(
-                            hitl_request["action_requests"]
-                        ):
-                            decision = prompt_for_tool_approval(
-                                action_request,
-                                assistant_id,
-                            )
-                            decisions.append(decision)
-
-                            # Mark file operations as HIL-approved if user approved
-                            if decision.get("type") == "approve":
-                                tool_name = action_request.get("name")
-                                if tool_name in {"write_file", "edit_file"}:
-                                    file_op_tracker.mark_hitl_approved(
-                                        tool_name, action_request.get("args", {})
-                                    )
-
-                        if any(decision.get("type") == "reject" for decision in decisions):
-                            any_rejected = True
-
-                        hitl_response[interrupt_id] = {"decisions": decisions}
-
-                suppress_resumed_output = any_rejected
+                    suppress_resumed_output = any_rejected
 
             if interrupt_occurred and hitl_response:
                 if suppress_resumed_output:
                     if spinner_active:
                         status.stop()
                         spinner_active = False
+
+                    is_preview_only = any(
+                        decision.get("type") == "preview"
+                        for resp in hitl_response.values()
+                        for decision in resp.get("decisions", [])
+                    )
+                    if is_preview_only:
+                        console.print("[dim]Preview only; no handoff was applied.[/dim]")
+                        console.print()
+                        return
 
                     console.print("[yellow]Command rejected.[/yellow]", style="bold")
                     console.print("Tell the agent what you'd like to do differently.")
@@ -640,3 +787,39 @@ async def execute_task(
         # Track token usage (display only via /tokens command)
         if token_tracker and (captured_input_tokens or captured_output_tokens):
             token_tracker.add(captured_input_tokens, captured_output_tokens)
+
+    # Check for handoff cleanup flag after agent turn completes
+    if session_state and session_state.thread_manager:
+        try:
+            final_state = await agent.aget_state(config)
+            state_values = getattr(final_state, "values", {}) or {}
+
+            if state_values.get("_handoff_cleanup_pending"):
+                from datetime import UTC, datetime
+
+                from deepagents_cli.handoff_persistence import clear_summary_block_file
+
+                thread_manager = session_state.thread_manager
+                agent_md_path = thread_manager.agent_dir / "agent.md"
+
+                # Clear summary block from agent.md
+                clear_summary_block_file(agent_md_path)
+                logger.debug(f"Handoff cleanup: Cleared summary block from {agent_md_path}")
+
+                # Update thread metadata
+                thread_id = thread_manager.get_current_thread_id()
+                thread_meta = thread_manager.get_thread_metadata(thread_id)
+
+                if thread_meta and "handoff" in thread_meta.get("metadata", {}):
+                    handoff_data = dict(thread_meta["metadata"]["handoff"])
+                    handoff_data["pending"] = False
+                    handoff_data["cleanup_required"] = False
+                    handoff_data["last_cleanup_at"] = (
+                        datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                    )
+
+                    thread_manager.update_thread_metadata(thread_id, {"handoff": handoff_data})
+                    logger.debug(f"Handoff cleanup: Updated metadata for thread {thread_id[:8]}")
+
+        except Exception as exc:
+            logger.warning(f"Failed to perform handoff cleanup: {exc}", exc_info=True)

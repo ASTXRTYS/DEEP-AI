@@ -106,6 +106,8 @@ class HandoffState(AgentState):
     _handoff_feedback: NotRequired[Annotated[str | None, PrivateStateAttr]]
     _handoff_previous_summary: NotRequired[Annotated[str | None, PrivateStateAttr]]
     _handoff_refinement_history: NotRequired[Annotated[list[dict[str, Any]], PrivateStateAttr]]
+    _handoff_id: NotRequired[Annotated[str | None, PrivateStateAttr]]
+    _handoff_created_at: NotRequired[Annotated[str | None, PrivateStateAttr]]
 
 
 def _build_action_args(
@@ -345,6 +347,8 @@ def generate_handoff_summary(
     feedback: str | None = None,
     previous_summary_md: str | None = None,
     iteration: int = 0,
+    handoff_id: str | None = None,
+    created_at: str | None = None,
 ) -> HandoffSummary:
     """Generate a structured handoff summary for the provided message history.
 
@@ -361,7 +365,7 @@ def generate_handoff_summary(
     from uuid import uuid4
 
     llm = _ensure_model(model)
-    handoff_id = str(uuid4())
+    handoff_id = handoff_id or str(uuid4())
 
     selected = select_messages_for_summary(messages)
     trimmed = _trim_for_prompt(selected)
@@ -425,7 +429,7 @@ def generate_handoff_summary(
     usage = getattr(response, "usage_metadata", {}) or {}
     tokens_used = usage.get("output_tokens") or usage.get("total_tokens") or 0
 
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    now = created_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     summary_md = render_summary_markdown(title, tldr, body)
     summary_json = {
         "schema_version": 1,
@@ -483,6 +487,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
             "_handoff_feedback": None,
             "_handoff_previous_summary": None,
             "_handoff_refinement_history": [],
+            "_handoff_id": None,
+            "_handoff_created_at": None,
         }
 
     def _sanitize_history(self, state: HandoffState) -> list[dict[str, Any]]:
@@ -543,6 +549,11 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
 
         history = self._sanitize_history(state)
 
+        base_handoff_id = state.get("_handoff_id")
+        handoff_created_at = state.get("_handoff_created_at")
+        if handoff_created_at is not None and not isinstance(handoff_created_at, str):
+            handoff_created_at = str(handoff_created_at)
+
         # Generate summary using helper function
         messages = state.get("messages") or []
         summary = generate_handoff_summary(
@@ -553,7 +564,11 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
             feedback=pending_feedback,
             previous_summary_md=previous_summary_md,
             iteration=iteration,
+            handoff_id=base_handoff_id,
+            created_at=handoff_created_at,
         )
+        base_handoff_id = base_handoff_id or summary.handoff_id
+        handoff_created_at = handoff_created_at or summary.summary_json.get("created_at")
 
         action_args = _build_action_args(
             summary=summary,
@@ -648,6 +663,8 @@ class HandoffSummarizationMiddleware(AgentMiddleware[HandoffState, Any]):
                 "_handoff_feedback": feedback_text,
                 "_handoff_previous_summary": summary.summary_md,
                 "_handoff_refinement_history": new_history,
+                "_handoff_id": base_handoff_id,
+                "_handoff_created_at": handoff_created_at,
                 "handoff_requested": True,
                 "handoff_decision": decision_with_history,
                 "handoff_approved": False,

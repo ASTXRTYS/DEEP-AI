@@ -127,20 +127,22 @@ def test_handoff_middleware_runs_refinement_iteration(monkeypatch, stub_summary)
     generated_calls: list[dict[str, Any]] = []
     summaries: list[HandoffSummary] = []
 
-    def _make_summary(idx: int) -> HandoffSummary:
+    def _make_summary(idx: int, handoff_id: str | None = None) -> HandoffSummary:
+        identifier = handoff_id or f"handoff-{idx}"
         summary_json = dict(stub_summary.summary_json)
-        summary_json["handoff_id"] = f"handoff-{idx}"
+        summary_json["handoff_id"] = identifier
         summary_json["title"] = f"Iteration {idx}"
         summary_md = f"### Iteration {idx}\n**TL;DR:** Pass {idx}\n\n#### Key Points\n- Body {idx}\n"
         return HandoffSummary(
-            handoff_id=f"handoff-{idx}",
+            handoff_id=identifier,
             summary_json=summary_json,
             summary_md=summary_md,
         )
 
     def _fake_generate(**kwargs):
         generated_calls.append(kwargs)
-        summary = _make_summary(len(generated_calls) - 1)
+        idx = len(generated_calls) - 1
+        summary = _make_summary(idx, kwargs.get("handoff_id"))
         summaries.append(summary)
         return summary
 
@@ -179,24 +181,30 @@ def test_handoff_middleware_runs_refinement_iteration(monkeypatch, stub_summary)
     assert first_update["_handoff_iteration"] == 1
     assert first_update["_handoff_feedback"] == "make this shorter"
     assert first_update["handoff_decision"]["type"] == "edit"
+    assert first_update["_handoff_id"] == summaries[0].handoff_id
+    assert first_update["_handoff_created_at"] == summaries[0].summary_json.get("created_at")
     state.update(first_update)
 
     second_update = middleware.after_model(state, runtime)
     assert second_update["handoff_requested"] is False
     assert second_update["handoff_approved"] is True
     assert second_update["_handoff_iteration"] == 0
+    assert second_update["_handoff_id"] is None
+    assert second_update["_handoff_created_at"] is None
 
     assert generated_calls[0]["iteration"] == 0
     assert generated_calls[0]["feedback"] is None
     assert generated_calls[1]["iteration"] == 1
     assert generated_calls[1]["feedback"] == "make this shorter"
     assert generated_calls[1]["previous_summary_md"] == summaries[0].summary_md
+    assert generated_calls[1]["handoff_id"] == summaries[0].handoff_id
 
     assert captured_payloads[0]["action_requests"][0]["args"]["iteration"] == 0
     second_args = captured_payloads[1]["action_requests"][0]["args"]
     assert second_args["iteration"] == 1
     assert len(second_args["feedback_history"]) == 1
     assert second_args["feedback_history"][0]["feedback"] == "make this shorter"
+    assert second_args["handoff_id"] == summaries[0].handoff_id
 
 
 def test_handoff_middleware_enforces_iteration_cap(monkeypatch, stub_summary):
@@ -267,6 +275,8 @@ def test_generate_handoff_summary_traces_iteration_metadata_and_tags():
         feedback="make this shorter",
         previous_summary_md=summary_initial.summary_md,
         iteration=2,
+        handoff_id=summary_initial.handoff_id,
+        created_at=summary_initial.summary_json["created_at"],
     )
 
     assert len(calls) == 2
@@ -310,3 +320,6 @@ def test_generate_handoff_summary_traces_iteration_metadata_and_tags():
 
     assert initial_tags == ["handoff-summary", "iteration-0", "initial"]
     assert refined_tags == ["handoff-summary", "iteration-2", "refinement"]
+
+    assert summary_refined.handoff_id == summary_initial.handoff_id
+    assert summary_refined.summary_json["created_at"] == summary_initial.summary_json["created_at"]

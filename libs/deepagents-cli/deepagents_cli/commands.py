@@ -12,27 +12,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from langsmith import Client
-from requests.exceptions import HTTPError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.shortcuts import CompleteStyle
-
 from deepagents.middleware.handoff_summarization import (
     MAX_REFINEMENT_ITERATIONS,
     HandoffSummary,
     generate_handoff_summary,
     select_messages_for_summary,
 )
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langsmith import Client
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import CompleteStyle
+from requests.exceptions import HTTPError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import COLORS, DEEP_AGENTS_ASCII, console
-from .prompt_theme import build_thread_prompt_style
 from .handoff_persistence import apply_handoff_acceptance
 from .handoff_ui import HandoffDecision, HandoffProposal, prompt_handoff_decision
+from .prompt_theme import build_thread_prompt_style
 from .server_client import extract_first_user_message, extract_last_message_preview, get_thread_data
 from .ui import TokenTracker, show_interactive_help
 
@@ -373,7 +372,22 @@ def _thread_toolbar() -> list[tuple[str, str]]:
 
 
 _THREAD_PROMPT_STYLE = build_thread_prompt_style()
-_THREAD_PROMPT_SESSION = PromptSession(style=_THREAD_PROMPT_STYLE, bottom_toolbar=_thread_toolbar)
+
+# Key bindings for thread selection prompt
+_thread_key_bindings = KeyBindings()
+
+
+@_thread_key_bindings.add("escape")
+def _cancel_thread_selection(event) -> None:
+    """Cancel thread selection with ESC key."""
+    event.app.exit(exception=KeyboardInterrupt())
+
+
+_THREAD_PROMPT_SESSION = PromptSession(
+    style=_THREAD_PROMPT_STYLE,
+    bottom_toolbar=_thread_toolbar,
+    key_bindings=_thread_key_bindings,
+)
 
 
 class _ThreadSelectionCompleter(Completer):
@@ -783,8 +797,10 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
         return True
 
     current_summary = summary
+    handoff_id = current_summary.handoff_id
+    created_at = current_summary.summary_json.get("created_at")
     proposal = HandoffProposal(
-        handoff_id=current_summary.handoff_id,
+        handoff_id=handoff_id,
         summary_json=dict(current_summary.summary_json),
         summary_md=current_summary.summary_md,
         parent_thread_id=thread_id,
@@ -843,6 +859,8 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
                 feedback=feedback,
                 previous_summary_md=proposal.summary_md,
                 iteration=iteration,
+                handoff_id=handoff_id,
+                created_at=created_at,
             )
         except Exception as exc:  # pragma: no cover - surfaced to CLI
             console.print()
@@ -850,9 +868,17 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
             console.print()
             return True
 
-        current_summary = refined_summary
+        refined_summary.summary_json["handoff_id"] = handoff_id
+        if created_at:
+            refined_summary.summary_json.setdefault("created_at", created_at)
+        current_summary = HandoffSummary(
+            handoff_id=handoff_id,
+            summary_json=refined_summary.summary_json,
+            summary_md=refined_summary.summary_md,
+        )
+        created_at = current_summary.summary_json.get("created_at", created_at)
         proposal = HandoffProposal(
-            handoff_id=current_summary.handoff_id,
+            handoff_id=handoff_id,
             summary_json=dict(current_summary.summary_json),
             summary_md=current_summary.summary_md,
             parent_thread_id=thread_id,
@@ -860,10 +886,12 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
         )
 
     final_summary_json = dict(decision.summary_json or current_summary.summary_json)
-    final_summary_json["handoff_id"] = current_summary.handoff_id
+    final_summary_json["handoff_id"] = handoff_id
+    if created_at:
+        final_summary_json.setdefault("created_at", created_at)
     final_summary_md = decision.summary_md or current_summary.summary_md
     prepared_summary = HandoffSummary(
-        handoff_id=current_summary.handoff_id,
+        handoff_id=handoff_id,
         summary_json=final_summary_json,
         summary_md=final_summary_md,
     )
@@ -875,6 +903,7 @@ async def handle_handoff_command(args: str, agent, session_state) -> bool:
             summary_md=final_summary_md,
             summary_json=final_summary_json,
             parent_thread_id=thread_id,
+            agent=agent,
         )
     except Exception as exc:  # pragma: no cover - surfaced to CLI
         console.print()

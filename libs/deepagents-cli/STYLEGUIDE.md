@@ -30,8 +30,7 @@ menus, slash-command dialogs) uses the same palette and UX affordances.
 ## Rich components
 
 - Panels, tables, and menus should use helpers in
-  `deepagents_cli.ui_components` or the styles defined in
-  `deepagents_cli.menu_system.styles`. Adding new colors? Extend the centralized
+  `deepagents_cli.ui_components`. Adding new colors? Extend the centralized
   constants in `ui_constants.py` or `prompt_theme.py` instead of introducing
   raw color literals.
 

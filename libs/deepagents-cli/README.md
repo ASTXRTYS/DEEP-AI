@@ -2,6 +2,45 @@
 
 This is the CLI for deepagents
 
+## Usage
+
+```bash
+# Start the default agent
+deepagents
+
+# Start a specific agent (uses ~/.deepagents/my-agent/)
+deepagents --agent my-agent
+
+# Enable auto-approval for all tools (no Human-in-the-Loop)
+deepagents --auto-approve
+
+# Run code in a remote sandbox (keeps your local machine safe)
+deepagents --sandbox modal
+deepagents --sandbox daytona
+deepagents --sandbox runloop
+```
+
+## Interactive Commands
+
+The CLI supports several slash commands to manage your session:
+
+- **/threads** - Manage conversation threads
+  - `/threads list` - Show all threads with token usage and trace stats
+  - `/threads switch <id>` - Switch to a different conversation history
+  - `/threads rename <id> <name>` - Rename a thread for better organization
+  - `/threads delete <id>` - Delete a thread (use `--force` to skip confirmation)
+  - `/threads info <id>` - View detailed metadata for a thread
+
+- **/handoff** - Summarize and start fresh
+  - Creates a high-quality summary of the current conversation
+  - Persists the summary to memory
+  - Switches to a new, clean thread with the summary injected
+  - Usage: `/handoff` or `/handoff --preview` to review first
+
+- **/clear** - Clear the terminal screen
+- **/quit**, **/exit** - Exit the CLI
+- **!cmd** - Run a bash command directly (e.g., `!ls -la`)
+
 ## Memory & Configuration Structure
 
 The CLI uses a dual-scope memory system with both **global** (per-agent) and **project-specific** configuration:
@@ -42,33 +81,35 @@ Both global and project agent.md files are loaded together, allowing you to:
 
 ### How the System Prompt is Constructed
 
-The CLI uses middleware to dynamically construct the system prompt on each model call:
+The CLI uses a middleware stack to dynamically construct the system prompt on each model call:
 
-1. **AgentMemoryMiddleware** (runs first):
-   - **Prepends** the contents of both agent.md files:
-     ```xml
-     <user_memory>[~/.deepagents/{agent}/agent.md content]</user_memory>
-     <project_memory>[{project}/.deepagents/agent.md content]</project_memory>
-     ```
-   - **Appends** memory management instructions (how to read/write memory files, decision framework)
+1. **AgentMemoryMiddleware**:
+   - **Prepends** the contents of both agent.md files (`<user_memory>` and `<project_memory>`)
+   - **Appends** memory management instructions
 
-2. **SkillsMiddleware** (runs second):
-   - **Appends** list of available skills (name + description only, not full SKILL.md content)
+2. **SkillsMiddleware**:
+   - **Appends** list of available skills (name + description)
    - **Appends** progressive disclosure instructions (how to read full SKILL.md when needed)
 
-3. **Base System Prompt**:
-   - Current working directory info
-   - Skills directory location
-   - Human-in-the-loop guidance
+3. **Handoff & Shell Middleware**:
+   - **HandoffMiddleware**: Manages conversation summarization and state persistence
+   - **ShellMiddleware**: Provides safe filesystem and shell access (local or sandboxed)
+
+4. **Base System Prompt**:
+   - **Current Working Directory**: Context about the environment (local vs. sandbox)
+   - **Skills Directory**: Where to find skill scripts
+   - **Human-in-the-Loop Guidance**: Protocols for tool approval/rejection
+   - **Web Search Usage**: Best practices for synthesis and citation
+   - **Todo List Management**: Rules for maintaining a focused task list
 
 **Final prompt structure:**
 ```
 <user_memory>...</user_memory>
 <project_memory>...</project_memory>
 
-[Base system prompt]
+[Base system prompt: CWD, Skills Path, HITL, Search, Todos]
 
-[Memory management instructions with project-scoped paths]
+[Memory management instructions]
 
 [Skills list + progressive disclosure instructions]
 ```

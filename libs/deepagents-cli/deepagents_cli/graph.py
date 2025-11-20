@@ -21,10 +21,10 @@ from deepagents.backends.filesystem import FilesystemBackend
 from langchain.agents.middleware import HostExecutionPolicy
 from langchain_anthropic import ChatAnthropic
 
+from deepagents_cli._internal import ResumableShellToolMiddleware
 from deepagents_cli.agent_memory import AgentMemoryMiddleware
 from deepagents_cli.config import settings
 from deepagents_cli.middleware_stack import build_handoff_middleware_stack
-from deepagents_cli.resumable_shell_async import AsyncResumableShellToolMiddleware
 from deepagents_cli.tools import http_request, tavily_client, web_search
 
 
@@ -70,7 +70,7 @@ model = _get_default_model()
 tools = _get_default_tools()
 
 # Set up middleware (same as CLI)
-shell_middleware = AsyncResumableShellToolMiddleware(
+shell_middleware = ResumableShellToolMiddleware(
     workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
 )
 

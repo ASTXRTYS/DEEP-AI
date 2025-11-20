@@ -277,7 +277,7 @@ See the [agent harness documentation](https://docs.langchain.com/oss/python/deep
 | **FilesystemMiddleware** | File operations and context offloading (auto-saves large results) |
 | **SubAgentMiddleware** | Delegate tasks to isolated sub-agents |
 | **SummarizationMiddleware** | Auto-summarizes when context exceeds 170k tokens |
-| **AnthropicPromptCachingMiddleware** | Caches system prompts to reduce costs (Anthropic only) |
+| **SafeAnthropicPromptCachingMiddleware** | Caches system prompts to reduce costs (Anthropic only) |
 | **PatchToolCallsMiddleware** | Fixes dangling tool calls from interruptions |
 | **HumanInTheLoopMiddleware** | Pauses execution for human approval (requires `interrupt_on` config) |
 

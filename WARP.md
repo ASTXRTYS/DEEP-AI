@@ -36,9 +36,10 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 Deep Agents = **Planning** + **File System** + **Subagents** + **Detailed Prompt**
 
 1. **Planning**: `TodoListMiddleware` provides `write_todos` tool for breaking down complex tasks
-2. **File System**: `FilesystemMiddleware` provides `ls`, `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search`
-3. **Subagents**: `SubAgentMiddleware` enables spawning specialized agents via `task` tool for context isolation
-4. **Prompts**: Comprehensive system prompts inspired by Claude Code
+2. **File System**: `FilesystemMiddleware` provides `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
+3. **Execution**: `ResumableShellToolMiddleware` provides `shell` (local) or `FilesystemMiddleware` provides `execute` (sandbox)
+4. **Subagents**: `SubAgentMiddleware` enables spawning specialized agents via `task` tool for context isolation
+5. **Prompts**: Comprehensive system prompts inspired by Claude Code
 
 ---
 
@@ -143,7 +144,7 @@ Middleware is applied in this order (from `libs/deepagents/graph.py:create_deep_
     FilesystemMiddleware(backend=backend),       # File operations
     SubAgentMiddleware(...),                     # Subagent spawning
     SummarizationMiddleware(...),               # Context compression
-    AnthropicPromptCachingMiddleware(...),      # Prompt caching
+    SafeAnthropicPromptCachingMiddleware(...),  # Prompt caching
     PatchToolCallsMiddleware(),                 # Tool call formatting
     *custom_middleware,                          # Your middleware
     HumanInTheLoopMiddleware(interrupt_on=...),  # HITL (if configured)
@@ -161,13 +162,16 @@ Middleware is applied in this order (from `libs/deepagents/graph.py:create_deep_
 
 **CompositeBackend** (used by CLI): Routes paths to different backends
 ```python
+# Local Mode (Default)
 CompositeBackend(
     default=FilesystemBackend(),           # Regular file ops in CWD
-    routes={
-        "/memories/": FilesystemBackend(   # Agent's persistent storage
-            root_dir="~/.deepagents/agent/"
-        )
-    }
+    routes={}                              # No virtual routes in local mode
+)
+
+# Sandbox Mode (Remote)
+CompositeBackend(
+    default=SandboxBackend(...),           # Remote execution environment
+    routes={}                              # No virtual routes
 )
 ```
 
@@ -176,19 +180,19 @@ CompositeBackend(
 **Three Storage Layers**:
 1. **Checkpointing** (conversation state): SQLite at `~/.deepagents/{agent_name}/checkpoints.db`
    - Stores conversation history and state for resuming threads
-2. **File Backend** (agent memory): Filesystem at `~/.deepagents/{agent_name}/` (accessible via `/memories/` prefix)
-   - Uses CompositeBackend that routes `/memories/` paths to FilesystemBackend
+2. **File Backend** (agent memory): Filesystem at `~/.deepagents/{agent_name}/`
    - Agent's long-term memory files (agent.md, notes, guides) stored as regular files on disk
+   - Accessible via absolute paths (e.g. `/Users/user/.deepagents/agent/`)
    - NOT stored in PostgreSQL - this is pure filesystem storage
 3. **Store** (cross-agent knowledge): PostgreSQL database (LangGraph Store feature)
    - Optional storage layer for sharing data across agents and conversations
-   - Different from file-based `/memories/` - this is for structured key-value storage
+   - Different from file-based memory - this is for structured key-value storage
 
 ### Agent Memory Architecture (Critical Understanding)
 
 **How Agent Memory Works:**
 
-The CLI implements a sophisticated agent memory system that gives agents persistent, self-modifiable instructions across sessions. This is implemented via `AgentMemoryMiddleware` and a two-part backend routing system.
+The CLI implements a sophisticated agent memory system that gives agents persistent, self-modifiable instructions across sessions. This is implemented via `AgentMemoryMiddleware`.
 
 **Memory System Components:**
 
@@ -200,26 +204,15 @@ The CLI implements a sophisticated agent memory system that gives agents persist
    - Default content from `default_agent_prompt.md` (immutable base template)
    - Agent can update its own behavior by editing this file
 
-2. **Backend Routing** - Two-Layer Filesystem Access
-   ```python
-   # In agent.py:create_agent_with_config()
-   long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
-   backend = CompositeBackend(
-       default=FilesystemBackend(),  # CWD access
-       routes={"/memories/": long_term_backend}  # Agent directory access
-   )
-   ```
-
-   **What this means:**
-   - Regular file operations (no prefix) → Current working directory
-   - `/memories/` prefix → `~/.deepagents/{agent_name}/` directory
-   - `virtual_mode=True` → Paths are virtual (sandboxed, no traversal)
-   - Agent can `ls /memories/`, `read_file /memories/notes.md`, etc.
+2. **Direct Filesystem Access**
+   - `AgentMemoryMiddleware` reads `agent.md` directly from the filesystem (using `pathlib`)
+   - It resolves the absolute path to the agent directory (e.g., `/Users/username/.deepagents/agent/`)
+   - It instructs the agent to use these absolute paths for reading/writing memory files
 
 3. **AgentMemoryMiddleware** - System Prompt Injection
-   - Reads `/agent.md` from the long_term_backend at session start
+   - Reads `agent.md` from disk at session start
    - Injects content into system prompt: `<agent_memory>{content}</agent_memory>`
-   - Adds instructions about memory system (how to use `/memories/`)
+   - Adds instructions about memory system (providing absolute paths to agent directory)
    - Happens in `wrap_model_call()` before every model invocation
 
 **Memory Loading Flow:**
@@ -229,67 +222,35 @@ The CLI implements a sophisticated agent memory system that gives agents persist
 2. Check if agent.md exists at ~/.deepagents/{agent_name}/agent.md
 3. If not, create it from default_agent_prompt.md template
 4. AgentMemoryMiddleware.before_agent() runs (once per session)
-   → Reads /agent.md from long_term_backend
+   → Reads ~/.deepagents/{agent_name}/agent.md directly from disk
    → Stores in state['agent_memory']
 5. AgentMemoryMiddleware.wrap_model_call() runs (every model call)
    → Retrieves state['agent_memory']
    → Wraps in <agent_memory> tags
    → Prepends to system_prompt
-   → Appends LONGTERM_MEMORY_SYSTEM_PROMPT instructions
+   → Appends LONGTERM_MEMORY_SYSTEM_PROMPT instructions (with absolute paths)
 6. Model sees complete system prompt with agent.md content
 ```
 
-**Key Insight - Dual Backend Usage:**
-
-The agent has TWO ways to access the same physical directory:
-
-```python
-# Backend setup in agent.py
-long_term_backend = FilesystemBackend(root_dir=agent_dir, virtual_mode=True)
-backend = CompositeBackend(
-    default=FilesystemBackend(),
-    routes={"/memories/": long_term_backend}
-)
-
-# AgentMemoryMiddleware uses long_term_backend directly
-AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/")
-
-# FilesystemMiddleware uses CompositeBackend
-FilesystemMiddleware(backend=backend)
-```
-
-**Why this matters:**
-- `AgentMemoryMiddleware` reads `/agent.md` directly from `long_term_backend` (no `/memories/` prefix needed)
-- `FilesystemMiddleware` tools require `/memories/` prefix to access same directory via CompositeBackend routing
-- Agent sees: `ls /memories/` shows files in `~/.deepagents/{agent_name}/`
-- Agent's `/memories/agent.md` and memory middleware's `/agent.md` point to the same file
-
 **File Operations Behavior:**
+
+The agent uses standard filesystem tools with absolute paths:
 
 ```bash
 # Agent tool calls and where they operate:
-ls /                           # Lists CWD
-ls /memories/                  # Lists ~/.deepagents/{agent_name}/
-read_file /src/main.py        # Reads {CWD}/src/main.py
-read_file /memories/guide.md  # Reads ~/.deepagents/{agent_name}/guide.md
-write_file /memories/notes.md # Creates ~/.deepagents/{agent_name}/notes.md
-edit_file /memories/agent.md  # Modifies agent's own system prompt!
+ls /                                     # Lists CWD
+ls /Users/user/.deepagents/agent/        # Lists agent memory directory
+read_file /src/main.py                   # Reads {CWD}/src/main.py
+read_file /Users/user/.deepagents/agent/agent.md  # Reads agent's own system prompt
+write_file /Users/user/.deepagents/agent/notes.md # Creates memory file
 ```
-
-**Virtual Mode Security:**
-
-The `long_term_backend` uses `virtual_mode=True` which provides:
-- Path sandboxing (all paths resolved relative to root_dir)
-- No traversal (`..` and `~` rejected)
-- No symlink following (O_NOFOLLOW flag when available)
-- Paths treated as virtual absolute (e.g., `/notes.md` → `{root_dir}/notes.md`)
 
 **Token Counting Implications:**
 
 The complete system prompt includes:
 1. `<agent_memory>` section (agent.md content)
 2. Base system prompt from `get_system_prompt()`
-3. `LONGTERM_MEMORY_SYSTEM_PROMPT` (instructions for using `/memories/`)
+3. `LONGTERM_MEMORY_SYSTEM_PROMPT` (instructions for using absolute paths)
 
 `calculate_baseline_tokens()` in `token_utils.py` accurately counts this by:
 - Reading agent.md directly from filesystem
@@ -346,10 +307,10 @@ with SqliteSaver.from_conn_string(db_uri) as checkpointer:
 | `libs/deepagents-cli/deepagents_cli/graph.py` | Server export for LangGraph |
 | `libs/deepagents/middleware/filesystem.py` | File system tools implementation |
 | `libs/deepagents/middleware/subagents.py` | Subagent spawning logic |
-| `libs/deepagents-cli/deepagents_cli/agent_memory.py` | Agent memory middleware (loads agent.md into system prompt) |
+| `libs/deepagents-cli/deepagents_cli/agent_memory.py` | Agent memory middleware (loads agent.md from disk) |
 | `libs/deepagents-cli/deepagents_cli/execution.py` | CLI execution loop |
 | `libs/deepagents-cli/deepagents_cli/thread_manager.py` | Thread lifecycle management |
-| `libs/deepagents/backends/composite.py` | CompositeBackend (routes `/memories/` to agent directory) |
+| `libs/deepagents/backends/composite.py` | CompositeBackend (supports backend routing) |
 | `libs/deepagents/backends/filesystem.py` | FilesystemBackend (disk-based file storage) |
 
 ---
@@ -482,8 +443,7 @@ cat ~/.deepagents/agent/threads.json | jq
 
 ### 4. Agent Storage Location Confusion
 - CLI storage: `~/.deepagents/{agent_name}/`
-- `/memories/` maps to agent directory, NOT current working directory
-- Regular file operations use current working directory
+- Regular file operations use current working directory (in local mode)
 
 ---
 
@@ -506,7 +466,7 @@ cat ~/.deepagents/agent/threads.json | jq
 ## Performance Considerations
 
 ### Prompt Caching
-`AnthropicPromptCachingMiddleware` automatically enables Anthropic's prompt caching for repeated context.
+`SafeAnthropicPromptCachingMiddleware` automatically enables Anthropic's prompt caching for repeated context.
 
 **Best Practices**:
 - Keep system prompts stable (cache hits)

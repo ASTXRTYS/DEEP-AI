@@ -242,8 +242,24 @@ class ThreadManager:
         source_thread_id: str | None = None,
         name: str | None = None,
     ) -> str:
-        """Fork a thread via the server API."""
-        from .server_client import fork_thread_on_server
+        """Fork a thread, preferring server API with local fallback.
+
+        Attempts to fork via LangGraph server API (which handles state copy
+        server-side). If server is unavailable, falls back to manual state
+        copy via local checkpointer.
+
+        Args:
+            agent: Compiled graph for state operations
+            source_thread_id: Thread to fork (defaults to current thread)
+            name: Optional name for forked thread
+
+        Returns:
+            ID of newly created thread
+
+        Raises:
+            ValueError: If source thread not found
+        """
+        from .server_client import LangGraphError, fork_thread_on_server
 
         if source_thread_id is None:
             source_thread_id = self.get_current_thread_id()
@@ -255,30 +271,26 @@ class ThreadManager:
             msg = f"Source thread '{source_thread_id}' not found. Available: {', '.join(available)}"
             raise ValueError(msg)
 
-        # Fork thread on server
-        new_thread_id = fork_thread_on_server(source_thread_id)
+        # Try server fork first (preferred - handles state copy server-side)
+        try:
+            new_thread_id = fork_thread_on_server(source_thread_id)
+            fork_method = "server"
+        except LangGraphError:
+            # Fallback: Manual state copy for local-only mode
+            fork_name = name or f"Fork of {source_thread.get('name', 'conversation')}"
+            new_thread_id = self.create_thread(name=fork_name, parent_id=source_thread_id)
 
-        # Also copy state in local checkpointer for compatibility
-        source_config = {"configurable": {"thread_id": source_thread_id}}
-        state = agent.get_state(source_config)
-        new_config = {"configurable": {"thread_id": new_thread_id}}
-        agent.update_state(new_config, state.values)
+            source_config = {"configurable": {"thread_id": source_thread_id}}
+            state = agent.get_state(source_config)
+            new_config = {"configurable": {"thread_id": new_thread_id}}
+            agent.update_state(new_config, state.values)
+            fork_method = "local"
 
         now = _now_iso()
         fork_name = name or f"Fork of {source_thread.get('name', 'conversation')}"
-        # Get token count for the forked thread
         source_token_count = source_thread.get("token_count", 0)
-        new_thread: ThreadMetadata = {
-            "id": new_thread_id,
-            "assistant_id": self.assistant_id,
-            "created": now,
-            "last_used": now,
-            "parent_id": source_thread_id,
-            "name": fork_name,
-            "token_count": source_token_count,  # Inherit from parent
-            "metadata": {},
-        }
 
+        # Update or create metadata entry
         with self.store.edit() as data:
             parent = next((t for t in data.threads if t["id"] == source_thread_id), None)
             if parent is None:
@@ -286,7 +298,29 @@ class ThreadManager:
                 raise ValueError(msg)
 
             parent["last_used"] = now
-            data.threads.append(new_thread)
+
+            # Check if thread was already created by server fork
+            existing = next((t for t in data.threads if t["id"] == new_thread_id), None)
+            if existing:
+                # Update existing metadata from server fork
+                existing["name"] = fork_name
+                existing["last_used"] = now
+                existing["parent_id"] = source_thread_id
+                existing["token_count"] = source_token_count
+            else:
+                # Add new thread metadata (local fork path)
+                new_thread: ThreadMetadata = {
+                    "id": new_thread_id,
+                    "assistant_id": self.assistant_id,
+                    "created": now,
+                    "last_used": now,
+                    "parent_id": source_thread_id,
+                    "name": fork_name,
+                    "token_count": source_token_count,
+                    "metadata": {},
+                }
+                data.threads.append(new_thread)
+
             data.current_thread_id = new_thread_id
 
         self.current_thread_id = new_thread_id
@@ -595,3 +629,70 @@ class ThreadManager:
                 if thread["id"] == thread_id:
                     thread["token_count"] = token_count
                     break
+
+    def get_health_metrics(self, *, active_days: int = 7) -> dict[str, int | float]:
+        """Gather health metrics for monitoring and operational insights.
+
+        Provides metrics for capacity planning, cleanup strategies, and
+        understanding usage patterns across threads.
+
+        Args:
+            active_days: Days threshold for considering a thread "active"
+
+        Returns:
+            Dictionary with metrics:
+            - thread_count: Total threads
+            - active_threads: Threads used within active_days
+            - inactive_threads: Threads not used within active_days
+            - avg_token_count: Average token count across all threads
+            - max_token_count: Maximum token count across all threads
+            - db_size_mb: Checkpoint database size in megabytes
+            - checkpoint_count: Total checkpoints in database
+        """
+        from datetime import timedelta
+
+        data = self._safe_load()
+        threads = data.threads
+
+        if not threads:
+            return {
+                "thread_count": 0,
+                "active_threads": 0,
+                "inactive_threads": 0,
+                "avg_token_count": 0.0,
+                "max_token_count": 0,
+                "db_size_mb": 0.0,
+                "checkpoint_count": 0,
+            }
+
+        cutoff = datetime.now(UTC) - timedelta(days=active_days)
+        active_count = 0
+
+        token_counts = []
+        for thread in threads:
+            # Check if thread is active
+            last_used_str = thread.get("last_used", "")
+            last_used_str = last_used_str.removesuffix("Z")
+            try:
+                last_used = datetime.fromisoformat(last_used_str).replace(tzinfo=UTC)
+                if last_used >= cutoff:
+                    active_count += 1
+            except (ValueError, AttributeError):
+                pass
+
+            # Collect token counts
+            token_count = thread.get("token_count", 0)
+            if token_count:
+                token_counts.append(token_count)
+
+        db_stats = self.get_database_stats()
+
+        return {
+            "thread_count": len(threads),
+            "active_threads": active_count,
+            "inactive_threads": len(threads) - active_count,
+            "avg_token_count": sum(token_counts) / len(token_counts) if token_counts else 0.0,
+            "max_token_count": max(token_counts) if token_counts else 0,
+            "db_size_mb": db_stats["db_size_bytes"] / 1024 / 1024,
+            "checkpoint_count": db_stats["checkpoint_count"],
+        }

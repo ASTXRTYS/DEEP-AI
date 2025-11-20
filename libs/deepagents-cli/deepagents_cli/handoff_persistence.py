@@ -156,6 +156,7 @@ def apply_handoff_acceptance(
     summary_md: str,
     summary_json: dict[str, Any],
     parent_thread_id: str,
+    agent=None,
 ) -> str:
     """Persist the accepted summary and create the handoff child thread.
 
@@ -164,46 +165,113 @@ def apply_handoff_acceptance(
     receive ``pending=False`` / ``cleanup_required=False`` while the child is
     marked ``pending=True`` / ``cleanup_required=True`` until its first
     response triggers :class:`HandoffCleanupMiddleware`.
+
+    Implements transaction-like rollback semantics to prevent inconsistent state
+    on partial failures. If any step fails, all prior changes are rolled back.
+
+    Args:
+        session_state: Session state with thread_manager
+        summary: Generated handoff summary
+        summary_md: Markdown-formatted summary
+        summary_json: JSON representation of summary
+        parent_thread_id: Source thread ID
+        agent: Optional compiled graph for thread deletion during rollback
+
+    Returns:
+        Created child thread ID
+
+    Raises:
+        Exception: If handoff acceptance fails (after rollback attempt)
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     thread_manager = session_state.thread_manager
     agent_md_path = thread_manager.agent_dir / "agent.md"
-    write_summary_block(agent_md_path, summary_md)
+    child_thread_id: str | None = None
 
-    child_name = summary_json.get("title") or "Handoff continuation"
-    child_thread_id = thread_manager.create_thread(
-        name=child_name,
-        parent_id=parent_thread_id,
-        metadata={
-            "handoff": {
-                "handoff_id": summary.handoff_id,
-                "source_thread_id": parent_thread_id,
-                "pending": True,
-                "cleanup_required": True,
-            }
-        },
-    )
-    parent_metadata = build_handoff_metadata(
-        handoff_id=summary.handoff_id,
-        source_thread_id=parent_thread_id,
-        child_thread_id=child_thread_id,
-        summary_json=summary_json,
-        pending=False,
-        cleanup_required=False,
-    )
-    child_metadata = build_handoff_metadata(
-        handoff_id=summary.handoff_id,
-        source_thread_id=parent_thread_id,
-        child_thread_id=child_thread_id,
-        summary_json=summary_json,
-        pending=True,
-        cleanup_required=True,
-    )
+    try:
+        # Step 1: Write summary block
+        write_summary_block(agent_md_path, summary_md)
+        logger.debug(f"Handoff: Wrote summary block to {agent_md_path}")
 
-    thread_manager.update_thread_metadata(parent_thread_id, {"handoff": parent_metadata})
-    thread_manager.update_thread_metadata(child_thread_id, {"handoff": child_metadata})
+        # Step 2: Create child thread
+        child_name = summary_json.get("title") or "Handoff continuation"
+        child_thread_id = thread_manager.create_thread(
+            name=child_name,
+            parent_id=parent_thread_id,
+            metadata={
+                "handoff": {
+                    "handoff_id": summary.handoff_id,
+                    "source_thread_id": parent_thread_id,
+                    "pending": True,
+                    "cleanup_required": True,
+                }
+            },
+        )
+        logger.debug(f"Handoff: Created child thread {child_thread_id}")
 
-    return child_thread_id
+        # Step 3: Build metadata for parent and child
+        parent_metadata = build_handoff_metadata(
+            handoff_id=summary.handoff_id,
+            source_thread_id=parent_thread_id,
+            child_thread_id=child_thread_id,
+            summary_json=summary_json,
+            pending=False,
+            cleanup_required=False,
+        )
+        child_metadata = build_handoff_metadata(
+            handoff_id=summary.handoff_id,
+            source_thread_id=parent_thread_id,
+            child_thread_id=child_thread_id,
+            summary_json=summary_json,
+            pending=True,
+            cleanup_required=True,
+        )
+
+        # Step 4: Update parent metadata
+        thread_manager.update_thread_metadata(parent_thread_id, {"handoff": parent_metadata})
+        logger.debug(f"Handoff: Updated parent metadata for {parent_thread_id}")
+
+        # Step 5: Update child metadata
+        thread_manager.update_thread_metadata(child_thread_id, {"handoff": child_metadata})
+        logger.debug(f"Handoff: Updated child metadata for {child_thread_id}")
+
+        return child_thread_id
+
+    except Exception as exc:
+        # Rollback all changes on any failure
+        logger.error(
+            f"Handoff acceptance failed at handoff_id={summary.handoff_id}, "
+            f"parent={parent_thread_id}, child={child_thread_id}: {exc}",
+            exc_info=True,
+        )
+
+        # Rollback step 1: Clear summary block
+        try:
+            clear_summary_block_file(agent_md_path)
+            logger.info(f"Handoff rollback: Cleared summary block from {agent_md_path}")
+        except Exception as rollback_exc:  # pragma: no cover
+            logger.warning(f"Handoff rollback: Failed to clear summary block: {rollback_exc}")
+
+        # Rollback step 2: Delete child thread if it was created
+        if child_thread_id and agent:
+            try:
+                thread_manager.delete_thread(child_thread_id, agent)
+                logger.info(f"Handoff rollback: Deleted child thread {child_thread_id}")
+            except Exception as rollback_exc:  # pragma: no cover
+                logger.warning(
+                    f"Handoff rollback: Failed to delete child thread {child_thread_id}: {rollback_exc}"
+                )
+        elif child_thread_id:
+            logger.warning(
+                f"Handoff rollback: Cannot delete child thread {child_thread_id} "
+                "(agent not provided to apply_handoff_acceptance)"
+            )
+
+        # Re-raise original exception for caller to handle
+        raise
 
 
 __all__ = [
